@@ -3,6 +3,7 @@ package storage
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/chrislusf/seaweedfs/weed/glog"
@@ -91,8 +92,10 @@ func (v *Volume) CommitCompact() error {
 
 	glog.V(3).Infof("Got volume %d committing lock...", v.Id)
 	v.nm.Close()
-	if err := v.DataBackend.Close(); err != nil {
-		glog.V(0).Infof("fail to close volume %d", v.Id)
+	if v.DataBackend != nil {
+		if err := v.DataBackend.Close(); err != nil {
+			glog.V(0).Infof("fail to close volume %d", v.Id)
+		}
 	}
 	v.DataBackend = nil
 	stats.VolumeServerVolumeCounter.WithLabelValues(v.Collection, "volume").Dec()
@@ -109,6 +112,10 @@ func (v *Volume) CommitCompact() error {
 			return e
 		}
 	} else {
+		if runtime.GOOS == "windows" {
+			os.RemoveAll(v.FileName() + ".dat")
+			os.RemoveAll(v.FileName() + ".idx")
+		}
 		var e error
 		if e = os.Rename(v.FileName()+".cpd", v.FileName()+".dat"); e != nil {
 			return fmt.Errorf("rename %s: %v", v.FileName()+".cpd", e)
@@ -122,7 +129,6 @@ func (v *Volume) CommitCompact() error {
 	//time.Sleep(20 * time.Second)
 
 	os.RemoveAll(v.FileName() + ".ldb")
-	os.RemoveAll(v.FileName() + ".bdb")
 
 	glog.V(3).Infof("Loading volume %d commit file...", v.Id)
 	if e = v.load(true, false, v.needleMapKind, 0); e != nil {

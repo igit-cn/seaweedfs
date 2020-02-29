@@ -3,6 +3,7 @@
 package command
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/user"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/chrislusf/seaweedfs/weed/filesys"
 	"github.com/chrislusf/seaweedfs/weed/glog"
+	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
 	"github.com/chrislusf/seaweedfs/weed/security"
 	"github.com/chrislusf/seaweedfs/weed/util"
 	"github.com/seaweedfs/fuse"
@@ -44,11 +46,12 @@ func runMount(cmd *Command, args []string) bool {
 		*mountOptions.ttlSec,
 		*mountOptions.dirListCacheLimit,
 		os.FileMode(umask),
+		*mountOptions.outsideContainerClusterMode,
 	)
 }
 
 func RunMount(filer, filerMountRootPath, dir, collection, replication, dataCenter string, chunkSizeLimitMB int,
-	allowOthers bool, ttlSec int, dirListCacheLimit int64, umask os.FileMode) bool {
+	allowOthers bool, ttlSec int, dirListCacheLimit int64, umask os.FileMode, outsideContainerClusterMode bool) bool {
 
 	util.LoadConfiguration("security", false)
 
@@ -99,7 +102,7 @@ func RunMount(filer, filerMountRootPath, dir, collection, replication, dataCente
 		fuse.VolumeName(mountName),
 		fuse.FSName(filer + ":" + filerMountRootPath),
 		fuse.Subtype("seaweedfs"),
-		fuse.NoAppleDouble(),
+		// fuse.NoAppleDouble(), // include .DS_Store, otherwise can not delete non-empty folders
 		fuse.NoAppleXattr(),
 		fuse.NoBrowse(),
 		fuse.AutoXattr(),
@@ -131,6 +134,7 @@ func RunMount(filer, filerMountRootPath, dir, collection, replication, dataCente
 		c.Close()
 	})
 
+	// parse filer grpc address
 	filerGrpcAddress, err := parseFilerGrpcAddress(filer)
 	if err != nil {
 		glog.V(0).Infof("parseFilerGrpcAddress: %v", err)
@@ -138,6 +142,21 @@ func RunMount(filer, filerMountRootPath, dir, collection, replication, dataCente
 		return true
 	}
 
+	// try to connect to filer, filerBucketsPath may be useful later
+	grpcDialOption := security.LoadClientTLS(util.GetViper(), "grpc.client")
+	err = withFilerClient(filerGrpcAddress, grpcDialOption, func(client filer_pb.SeaweedFilerClient) error {
+		_, err := client.GetFilerConfiguration(context.Background(), &filer_pb.GetFilerConfigurationRequest{})
+		if err != nil {
+			return fmt.Errorf("get filer %s configuration: %v", filerGrpcAddress, err)
+		}
+		return nil
+	})
+	if err != nil {
+		glog.Fatal(err)
+		return false
+	}
+
+	// find mount point
 	mountRoot := filerMountRootPath
 	if mountRoot != "/" && strings.HasSuffix(mountRoot, "/") {
 		mountRoot = mountRoot[0 : len(mountRoot)-1]
@@ -146,22 +165,23 @@ func RunMount(filer, filerMountRootPath, dir, collection, replication, dataCente
 	daemonize.SignalOutcome(nil)
 
 	err = fs.Serve(c, filesys.NewSeaweedFileSystem(&filesys.Option{
-		FilerGrpcAddress:   filerGrpcAddress,
-		GrpcDialOption:     security.LoadClientTLS(util.GetViper(), "grpc.client"),
-		FilerMountRootPath: mountRoot,
-		Collection:         collection,
-		Replication:        replication,
-		TtlSec:             int32(ttlSec),
-		ChunkSizeLimit:     int64(chunkSizeLimitMB) * 1024 * 1024,
-		DataCenter:         dataCenter,
-		DirListCacheLimit:  dirListCacheLimit,
-		EntryCacheTtl:      3 * time.Second,
-		MountUid:           uid,
-		MountGid:           gid,
-		MountMode:          mountMode,
-		MountCtime:         fileInfo.ModTime(),
-		MountMtime:         time.Now(),
-		Umask:              umask,
+		FilerGrpcAddress:            filerGrpcAddress,
+		GrpcDialOption:              grpcDialOption,
+		FilerMountRootPath:          mountRoot,
+		Collection:                  collection,
+		Replication:                 replication,
+		TtlSec:                      int32(ttlSec),
+		ChunkSizeLimit:              int64(chunkSizeLimitMB) * 1024 * 1024,
+		DataCenter:                  dataCenter,
+		DirListCacheLimit:           dirListCacheLimit,
+		EntryCacheTtl:               3 * time.Second,
+		MountUid:                    uid,
+		MountGid:                    gid,
+		MountMode:                   mountMode,
+		MountCtime:                  fileInfo.ModTime(),
+		MountMtime:                  time.Now(),
+		Umask:                       umask,
+		OutsideContainerClusterMode: outsideContainerClusterMode,
 	}))
 	if err != nil {
 		fuse.Unmount(dir)

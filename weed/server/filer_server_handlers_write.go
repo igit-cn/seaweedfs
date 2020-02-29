@@ -32,7 +32,7 @@ var (
 
 type FilerPostResult struct {
 	Name  string `json:"name,omitempty"`
-	Size  uint32 `json:"size,omitempty"`
+	Size  int64  `json:"size,omitempty"`
 	Error string `json:"error,omitempty"`
 	Fid   string `json:"fid,omitempty"`
 	Url   string `json:"url,omitempty"`
@@ -80,14 +80,7 @@ func (fs *FilerServer) PostHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 
 	query := r.URL.Query()
-	replication := query.Get("replication")
-	if replication == "" {
-		replication = fs.option.DefaultReplication
-	}
-	collection := query.Get("collection")
-	if collection == "" {
-		collection = fs.option.Collection
-	}
+	collection, replication := fs.detectCollection(r.RequestURI, query.Get("collection"), query.Get("replication"))
 	dataCenter := query.Get("dataCenter")
 	if dataCenter == "" {
 		dataCenter = fs.option.DataCenter
@@ -130,7 +123,7 @@ func (fs *FilerServer) PostHandler(w http.ResponseWriter, r *http.Request) {
 	// send back post result
 	reply := FilerPostResult{
 		Name:  ret.Name,
-		Size:  ret.Size,
+		Size:  int64(ret.Size),
 		Error: ret.Error,
 		Fid:   fileId,
 		Url:   urlLocation,
@@ -304,4 +297,33 @@ func (fs *FilerServer) DeleteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (fs *FilerServer) detectCollection(requestURI, qCollection, qReplication string) (collection, replication string) {
+	// default
+	collection = fs.option.Collection
+	replication = fs.option.DefaultReplication
+
+	// get default collection settings
+	if qCollection != "" {
+		collection = qCollection
+	}
+	if qReplication != "" {
+		replication = qReplication
+	}
+
+	// required by buckets folder
+	if strings.HasPrefix(requestURI, fs.filer.DirBucketsPath+"/") {
+		bucketAndObjectKey := requestURI[len(fs.filer.DirBucketsPath)+1:]
+		t := strings.Index(bucketAndObjectKey, "/")
+		if t < 0 {
+			collection = bucketAndObjectKey
+		}
+		if t > 0 {
+			collection = bucketAndObjectKey[:t]
+		}
+		replication = fs.filer.ReadBucketOption(collection)
+	}
+
+	return
 }

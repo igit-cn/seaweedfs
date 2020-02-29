@@ -54,6 +54,7 @@ func (fs *FilerServer) ListEntries(req *filer_pb.ListEntriesRequest, stream file
 	includeLastFile := req.InclusiveStartFrom
 	for limit > 0 {
 		entries, err := fs.filer.ListDirectoryEntries(stream.Context(), filer2.FullPath(req.Directory), lastFileName, includeLastFile, paginationLimit)
+
 		if err != nil {
 			return err
 		}
@@ -84,6 +85,7 @@ func (fs *FilerServer) ListEntries(req *filer_pb.ListEntriesRequest, stream file
 			}); err != nil {
 				return err
 			}
+
 			limit--
 			if limit == 0 {
 				return nil
@@ -217,7 +219,30 @@ func (fs *FilerServer) UpdateEntry(ctx context.Context, req *filer_pb.UpdateEntr
 
 func (fs *FilerServer) DeleteEntry(ctx context.Context, req *filer_pb.DeleteEntryRequest) (resp *filer_pb.DeleteEntryResponse, err error) {
 	err = fs.filer.DeleteEntryMetaAndData(ctx, filer2.FullPath(filepath.ToSlash(filepath.Join(req.Directory, req.Name))), req.IsRecursive, req.IgnoreRecursiveError, req.IsDeleteData)
-	return &filer_pb.DeleteEntryResponse{}, err
+	resp = &filer_pb.DeleteEntryResponse{}
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return resp, nil
+}
+
+func (fs *FilerServer) StreamDeleteEntries(stream filer_pb.SeaweedFiler_StreamDeleteEntriesServer) error {
+	for {
+		req, err := stream.Recv()
+		if err != nil {
+			return fmt.Errorf("receive delete entry request: %v", err)
+		}
+		fullpath := filer2.FullPath(filepath.ToSlash(filepath.Join(req.Directory, req.Name)))
+		err = fs.filer.DeleteEntryMetaAndData(context.Background(), fullpath, req.IsRecursive, req.IgnoreRecursiveError, req.IsDeleteData)
+		resp := &filer_pb.DeleteEntryResponse{}
+		if err != nil {
+			resp.Error = err.Error()
+		}
+		if err := stream.Send(resp); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (fs *FilerServer) AssignVolume(ctx context.Context, req *filer_pb.AssignVolumeRequest) (resp *filer_pb.AssignVolumeResponse, err error) {
@@ -226,6 +251,7 @@ func (fs *FilerServer) AssignVolume(ctx context.Context, req *filer_pb.AssignVol
 	if req.TtlSec > 0 {
 		ttlStr = strconv.Itoa(int(req.TtlSec))
 	}
+	collection, replication := fs.detectCollection(req.ParentPath, req.Collection, req.Replication)
 
 	var altRequest *operation.VolumeAssignRequest
 
@@ -236,16 +262,16 @@ func (fs *FilerServer) AssignVolume(ctx context.Context, req *filer_pb.AssignVol
 
 	assignRequest := &operation.VolumeAssignRequest{
 		Count:       uint64(req.Count),
-		Replication: req.Replication,
-		Collection:  req.Collection,
+		Replication: replication,
+		Collection:  collection,
 		Ttl:         ttlStr,
 		DataCenter:  dataCenter,
 	}
 	if dataCenter != "" {
 		altRequest = &operation.VolumeAssignRequest{
 			Count:       uint64(req.Count),
-			Replication: req.Replication,
-			Collection:  req.Collection,
+			Replication: replication,
+			Collection:  collection,
 			Ttl:         ttlStr,
 			DataCenter:  "",
 		}
@@ -253,26 +279,28 @@ func (fs *FilerServer) AssignVolume(ctx context.Context, req *filer_pb.AssignVol
 	assignResult, err := operation.Assign(fs.filer.GetMaster(), fs.grpcDialOption, assignRequest, altRequest)
 	if err != nil {
 		glog.V(3).Infof("AssignVolume: %v", err)
-		return nil, fmt.Errorf("assign volume: %v", err)
+		return &filer_pb.AssignVolumeResponse{Error: fmt.Sprintf("assign volume: %v", err)}, nil
 	}
 	if assignResult.Error != "" {
 		glog.V(3).Infof("AssignVolume error: %v", assignResult.Error)
-		return nil, fmt.Errorf("assign volume result: %v", assignResult.Error)
+		return &filer_pb.AssignVolumeResponse{Error: fmt.Sprintf("assign volume result: %v", assignResult.Error)}, nil
 	}
 
 	return &filer_pb.AssignVolumeResponse{
-		FileId:    assignResult.Fid,
-		Count:     int32(assignResult.Count),
-		Url:       assignResult.Url,
-		PublicUrl: assignResult.PublicUrl,
-		Auth:      string(assignResult.Auth),
-	}, err
+		FileId:      assignResult.Fid,
+		Count:       int32(assignResult.Count),
+		Url:         assignResult.Url,
+		PublicUrl:   assignResult.PublicUrl,
+		Auth:        string(assignResult.Auth),
+		Collection:  collection,
+		Replication: replication,
+	}, nil
 }
 
 func (fs *FilerServer) DeleteCollection(ctx context.Context, req *filer_pb.DeleteCollectionRequest) (resp *filer_pb.DeleteCollectionResponse, err error) {
 
-	err = fs.filer.MasterClient.WithClient(ctx, func(client master_pb.SeaweedClient) error {
-		_, err := client.CollectionDelete(ctx, &master_pb.CollectionDeleteRequest{
+	err = fs.filer.MasterClient.WithClient(func(client master_pb.SeaweedClient) error {
+		_, err := client.CollectionDelete(context.Background(), &master_pb.CollectionDeleteRequest{
 			Name: req.GetCollection(),
 		})
 		return err
@@ -308,5 +336,7 @@ func (fs *FilerServer) GetFilerConfiguration(ctx context.Context, req *filer_pb.
 		Collection:  fs.option.Collection,
 		Replication: fs.option.DefaultReplication,
 		MaxMb:       uint32(fs.option.MaxMB),
+		DirBuckets:  fs.filer.DirBucketsPath,
+		DirQueues:   fs.filer.DirQueuesPath,
 	}, nil
 }

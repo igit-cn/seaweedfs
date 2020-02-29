@@ -74,7 +74,10 @@ const (
 # with http DELETE, by default the filer would check whether a folder is empty.
 # recursive_delete will delete all sub folders and files, similar to "rm -Rf"
 recursive_delete = false
-
+# directories under this folder will be automatically creating a separate bucket
+buckets_folder = /buckets
+# directories under this folder will be store message queue data
+queues_folder = /queues
 
 ####################################################
 # The following are filer store options
@@ -323,6 +326,10 @@ key  = ""
 cert = ""
 key  = ""
 
+[grpc.queue]
+cert = ""
+key  = ""
+
 # use this for any place needs a grpc client
 # i.e., "weed backup|benchmark|filer.copy|filer.replicate|mount|s3|upload"
 [grpc.client]
@@ -369,6 +376,8 @@ type = "memory"     # Choose [memory|etcd] type for storing the file id sequence
 sequencer_etcd_urls = "http://127.0.0.1:2379"
 
 
+# configurations for tiered cloud storage
+# old volumes are transparently moved to cloud for cost efficiency
 [storage.backend]
 	[storage.backend.s3.default]
 	enabled = false
@@ -376,6 +385,18 @@ sequencer_etcd_urls = "http://127.0.0.1:2379"
 	aws_secret_access_key = ""     # if empty, loads from the shared credentials file (~/.aws/credentials).
 	region = "us-east-2"
 	bucket = "your_bucket_name"    # an existing bucket
+
+# create this number of logical volumes if no more writable volumes
+# count_x means how many copies of data.
+# e.g.:
+#   000 has only one copy, count_1
+#   010 and 001 has two copies, count_2
+#   011 has only 3 copies, count_3
+[master.volume_growth]
+count_1 = 7                # create 1 x 7 = 7 actual volumes
+count_2 = 6                # create 2 x 6 = 12 actual volumes
+count_3 = 3                # create 3 x 3 = 9 actual volumes
+count_other = 1            # create n x 1 = n actual volumes
 
 `
 )

@@ -1,7 +1,6 @@
 package weed_server
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -52,9 +51,10 @@ func (vs *VolumeServer) PostHandler(w http.ResponseWriter, r *http.Request) {
 	ret := operation.UploadResult{}
 	_, isUnchanged, writeError := topology.ReplicatedWrite(vs.GetMaster(), vs.store, volumeId, needle, r)
 
-	// http 304 status code does not allow body
+	// http 204 status code does not allow body
 	if writeError == nil && isUnchanged {
-		w.WriteHeader(http.StatusNotModified)
+		setEtag(w, needle.Etag())
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
@@ -97,7 +97,7 @@ func (vs *VolumeServer) DeleteHandler(w http.ResponseWriter, r *http.Request) {
 	ecVolume, hasEcVolume := vs.store.FindEcVolume(volumeId)
 
 	if hasEcVolume {
-		count, err := vs.store.DeleteEcShardNeedle(context.Background(), ecVolume, n, cookie)
+		count, err := vs.store.DeleteEcShardNeedle(ecVolume, n, cookie)
 		writeDeleteResult(err, count, w, r)
 		return
 	}

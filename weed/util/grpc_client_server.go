@@ -29,7 +29,8 @@ func NewGrpcServer(opts ...grpc.ServerOption) *grpc.Server {
 		Time:    10 * time.Second, // wait time before ping if no activity
 		Timeout: 20 * time.Second, // ping timeout
 	}), grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
-		MinTime: 60 * time.Second, // min time a client should wait before sending a ping
+		MinTime:             60 * time.Second, // min time a client should wait before sending a ping
+		PermitWithoutStream: true,
 	}))
 	for _, opt := range opts {
 		if opt != nil {
@@ -46,8 +47,9 @@ func GrpcDial(ctx context.Context, address string, opts ...grpc.DialOption) (*gr
 	options = append(options,
 		// grpc.WithInsecure(),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:    30 * time.Second, // client ping server if no activity for this long
-			Timeout: 20 * time.Second,
+			Time:                30 * time.Second, // client ping server if no activity for this long
+			Timeout:             20 * time.Second,
+			PermitWithoutStream: true,
 		}))
 	for _, opt := range opts {
 		if opt != nil {
@@ -57,14 +59,14 @@ func GrpcDial(ctx context.Context, address string, opts ...grpc.DialOption) (*gr
 	return grpc.DialContext(ctx, address, options...)
 }
 
-func WithCachedGrpcClient(ctx context.Context, fn func(context.Context, *grpc.ClientConn) error, address string, opts ...grpc.DialOption) error {
+func WithCachedGrpcClient(fn func(*grpc.ClientConn) error, address string, opts ...grpc.DialOption) error {
 
 	grpcClientsLock.Lock()
 
 	existingConnection, found := grpcClients[address]
 	if found {
 		grpcClientsLock.Unlock()
-		err := fn(ctx, existingConnection)
+		err := fn(existingConnection)
 		if err != nil {
 			grpcClientsLock.Lock()
 			delete(grpcClients, address)
@@ -74,7 +76,7 @@ func WithCachedGrpcClient(ctx context.Context, fn func(context.Context, *grpc.Cl
 		return err
 	}
 
-	grpcConnection, err := GrpcDial(ctx, address, opts...)
+	grpcConnection, err := GrpcDial(context.Background(), address, opts...)
 	if err != nil {
 		grpcClientsLock.Unlock()
 		return fmt.Errorf("fail to dial %s: %v", address, err)
@@ -83,7 +85,7 @@ func WithCachedGrpcClient(ctx context.Context, fn func(context.Context, *grpc.Cl
 	grpcClients[address] = grpcConnection
 	grpcClientsLock.Unlock()
 
-	err = fn(ctx, grpcConnection)
+	err = fn(grpcConnection)
 	if err != nil {
 		grpcClientsLock.Lock()
 		delete(grpcClients, address)

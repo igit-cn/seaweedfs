@@ -82,6 +82,10 @@ func NewFilerServer(defaultMux, readonlyMux *http.ServeMux, option *FilerOption)
 	util.LoadConfiguration("notification", false)
 
 	fs.option.recursiveDelete = v.GetBool("filer.options.recursive_delete")
+	v.Set("filer.option.buckets_folder", "/buckets")
+	v.Set("filer.option.queues_folder", "/queues")
+	fs.filer.DirBucketsPath = v.GetString("filer.option.buckets_folder")
+	fs.filer.DirQueuesPath = v.GetString("filer.option.queues_folder")
 	fs.filer.LoadConfiguration(v)
 
 	notification.LoadConfiguration(v, "notification.")
@@ -93,6 +97,8 @@ func NewFilerServer(defaultMux, readonlyMux *http.ServeMux, option *FilerOption)
 	if defaultMux != readonlyMux {
 		readonlyMux.HandleFunc("/", fs.readonlyFilerHandler)
 	}
+
+	fs.filer.LoadBuckets(fs.filer.DirBucketsPath)
 
 	maybeStartMetrics(fs, option)
 
@@ -122,8 +128,8 @@ func maybeStartMetrics(fs *FilerServer, option *FilerOption) {
 }
 
 func readFilerConfiguration(grpcDialOption grpc.DialOption, masterGrpcAddress string) (metricsAddress string, metricsIntervalSec int, err error) {
-	err = operation.WithMasterServerClient(masterGrpcAddress, grpcDialOption, func(ctx context.Context, masterClient master_pb.SeaweedClient) error {
-		resp, err := masterClient.GetMasterConfiguration(ctx, &master_pb.GetMasterConfigurationRequest{})
+	err = operation.WithMasterServerClient(masterGrpcAddress, grpcDialOption, func(masterClient master_pb.SeaweedClient) error {
+		resp, err := masterClient.GetMasterConfiguration(context.Background(), &master_pb.GetMasterConfigurationRequest{})
 		if err != nil {
 			return fmt.Errorf("get master %s configuration: %v", masterGrpcAddress, err)
 		}

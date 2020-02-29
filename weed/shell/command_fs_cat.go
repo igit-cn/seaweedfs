@@ -38,23 +38,24 @@ func (c *commandFsCat) Do(args []string, commandEnv *CommandEnv, writer io.Write
 		return err
 	}
 
-	ctx := context.Background()
-
-	if commandEnv.isDirectory(ctx, filerServer, filerPort, path) {
+	if commandEnv.isDirectory(filerServer, filerPort, path) {
 		return fmt.Errorf("%s is a directory", path)
 	}
 
 	dir, name := filer2.FullPath(path).DirAndName()
 
-	return commandEnv.withFilerClient(ctx, filerServer, filerPort, func(ctx context.Context, client filer_pb.SeaweedFilerClient) error {
+	return commandEnv.withFilerClient(filerServer, filerPort, func(client filer_pb.SeaweedFilerClient) error {
 
 		request := &filer_pb.LookupDirectoryEntryRequest{
 			Name:      name,
 			Directory: dir,
 		}
-		respLookupEntry, err := client.LookupDirectoryEntry(ctx, request)
+		respLookupEntry, err := client.LookupDirectoryEntry(context.Background(), request)
 		if err != nil {
 			return err
+		}
+		if respLookupEntry.Entry == nil {
+			return fmt.Errorf("file not found: %s", path)
 		}
 
 		return filer2.StreamContent(commandEnv.MasterClient, writer, respLookupEntry.Entry.Chunks, 0, math.MaxInt32)
