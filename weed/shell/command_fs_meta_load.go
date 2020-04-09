@@ -7,7 +7,6 @@ import (
 
 	"github.com/golang/protobuf/proto"
 
-	"github.com/chrislusf/seaweedfs/weed/filer2"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
 	"github.com/chrislusf/seaweedfs/weed/util"
 )
@@ -38,11 +37,6 @@ func (c *commandFsMetaLoad) Do(args []string, commandEnv *CommandEnv, writer io.
 		return nil
 	}
 
-	filerServer, filerPort, path, err := commandEnv.parseUrl(findInputDirectory(nil))
-	if err != nil {
-		return err
-	}
-
 	fileName := args[len(args)-1]
 
 	dst, err := os.OpenFile(fileName, os.O_RDONLY, 0644)
@@ -53,7 +47,7 @@ func (c *commandFsMetaLoad) Do(args []string, commandEnv *CommandEnv, writer io.
 
 	var dirCount, fileCount uint64
 
-	err = commandEnv.withFilerClient(filerServer, filerPort, func(client filer_pb.SeaweedFilerClient) error {
+	err = commandEnv.WithFilerClient(func(client filer_pb.SeaweedFilerClient) error {
 
 		sizeBuf := make([]byte, 4)
 
@@ -85,7 +79,7 @@ func (c *commandFsMetaLoad) Do(args []string, commandEnv *CommandEnv, writer io.
 				return err
 			}
 
-			fmt.Fprintf(writer, "load %s\n", filer2.FullPath(fullEntry.Dir).Child(fullEntry.Entry.Name))
+			fmt.Fprintf(writer, "load %s\n", util.FullPath(fullEntry.Dir).Child(fullEntry.Entry.Name))
 
 			if fullEntry.Entry.IsDirectory {
 				dirCount++
@@ -99,7 +93,7 @@ func (c *commandFsMetaLoad) Do(args []string, commandEnv *CommandEnv, writer io.
 
 	if err == nil {
 		fmt.Fprintf(writer, "\ntotal %d directories, %d files", dirCount, fileCount)
-		fmt.Fprintf(writer, "\n%s is loaded to http://%s:%d%s\n", fileName, filerServer, filerPort, path)
+		fmt.Fprintf(writer, "\n%s is loaded.\n", fileName)
 	}
 
 	return err

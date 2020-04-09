@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -15,11 +14,6 @@ import (
 
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
-)
-
-var (
-	OS_UID = uint32(os.Getuid())
-	OS_GID = uint32(os.Getgid())
 )
 
 type ListAllMyBucketsResult struct {
@@ -79,7 +73,7 @@ func (s3a *S3ApiServer) DeleteBucketHandler(w http.ResponseWriter, r *http.Reque
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 
-	err := s3a.withFilerClient(func(client filer_pb.SeaweedFilerClient) error {
+	err := s3a.WithFilerClient(func(client filer_pb.SeaweedFilerClient) error {
 
 		// delete collection
 		deleteCollectionRequest := &filer_pb.DeleteCollectionRequest{
@@ -94,7 +88,7 @@ func (s3a *S3ApiServer) DeleteBucketHandler(w http.ResponseWriter, r *http.Reque
 		return nil
 	})
 
-	err = s3a.rm(s3a.option.BucketsPath, bucket, true, false, true)
+	err = s3a.rm(s3a.option.BucketsPath, bucket, false, true)
 
 	if err != nil {
 		writeErrorResponse(w, ErrInternalError, r.URL)
@@ -109,7 +103,7 @@ func (s3a *S3ApiServer) HeadBucketHandler(w http.ResponseWriter, r *http.Request
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 
-	err := s3a.withFilerClient(func(client filer_pb.SeaweedFilerClient) error {
+	err := s3a.WithFilerClient(func(client filer_pb.SeaweedFilerClient) error {
 
 		request := &filer_pb.LookupDirectoryEntryRequest{
 			Directory: s3a.option.BucketsPath,
@@ -117,7 +111,10 @@ func (s3a *S3ApiServer) HeadBucketHandler(w http.ResponseWriter, r *http.Request
 		}
 
 		glog.V(1).Infof("lookup bucket: %v", request)
-		if resp, err := client.LookupDirectoryEntry(context.Background(), request); err != nil || resp.Entry == nil {
+		if _, err := filer_pb.LookupEntry(client, request); err != nil {
+			if err == filer_pb.ErrNotFound {
+				return filer_pb.ErrNotFound
+			}
 			return fmt.Errorf("lookup bucket %s/%s: %v", s3a.option.BucketsPath, bucket, err)
 		}
 

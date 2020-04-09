@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
+	"github.com/chrislusf/seaweedfs/weed/util"
 )
 
 type Attr struct {
@@ -20,6 +21,7 @@ type Attr struct {
 	UserName      string
 	GroupNames    []string
 	SymlinkTarget string
+	Md5           []byte
 }
 
 func (attr Attr) IsDirectory() bool {
@@ -27,7 +29,7 @@ func (attr Attr) IsDirectory() bool {
 }
 
 type Entry struct {
-	FullPath
+	util.FullPath
 
 	Attr
 	Extended map[string][]byte

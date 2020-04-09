@@ -2,7 +2,9 @@ package filer_pb
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/storage/needle"
@@ -84,3 +86,20 @@ func CreateEntry(client SeaweedFilerClient, request *CreateEntryRequest) error {
 	}
 	return nil
 }
+
+func LookupEntry(client SeaweedFilerClient, request *LookupDirectoryEntryRequest) (*LookupDirectoryEntryResponse, error) {
+	resp, err := client.LookupDirectoryEntry(context.Background(), request)
+	if err != nil {
+		if err == ErrNotFound || strings.Contains(err.Error(), ErrNotFound.Error()) {
+			return nil, ErrNotFound
+		}
+		glog.V(3).Infof("read %s/%v: %v", request.Directory, request.Name, err)
+		return nil, fmt.Errorf("LookupEntry1: %v", err)
+	}
+	if resp.Entry == nil {
+		return nil, ErrNotFound
+	}
+	return resp, nil
+}
+
+var ErrNotFound = errors.New("filer: no entry is found in filer store")

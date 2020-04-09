@@ -4,10 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
 
-	"github.com/chrislusf/seaweedfs/weed/filer2"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
+	"github.com/chrislusf/seaweedfs/weed/util"
 )
 
 func init() {
@@ -37,35 +36,35 @@ func (c *commandFsMv) Help() string {
 
 func (c *commandFsMv) Do(args []string, commandEnv *CommandEnv, writer io.Writer) (err error) {
 
-	filerServer, filerPort, sourcePath, err := commandEnv.parseUrl(args[0])
+	sourcePath, err := commandEnv.parseUrl(args[0])
 	if err != nil {
 		return err
 	}
 
-	_, _, destinationPath, err := commandEnv.parseUrl(args[1])
+	destinationPath, err := commandEnv.parseUrl(args[1])
 	if err != nil {
 		return err
 	}
 
-	sourceDir, sourceName := filer2.FullPath(sourcePath).DirAndName()
+	sourceDir, sourceName := util.FullPath(sourcePath).DirAndName()
 
-	destinationDir, destinationName := filer2.FullPath(destinationPath).DirAndName()
+	destinationDir, destinationName := util.FullPath(destinationPath).DirAndName()
 
-	return commandEnv.withFilerClient(filerServer, filerPort, func(client filer_pb.SeaweedFilerClient) error {
+	return commandEnv.WithFilerClient(func(client filer_pb.SeaweedFilerClient) error {
 
 		// collect destination entry info
 		destinationRequest := &filer_pb.LookupDirectoryEntryRequest{
 			Name:      destinationDir,
 			Directory: destinationName,
 		}
-		respDestinationLookupEntry, err := client.LookupDirectoryEntry(context.Background(), destinationRequest)
+		respDestinationLookupEntry, err := filer_pb.LookupEntry(client, destinationRequest)
 
 		var targetDir, targetName string
 
 		// moving a file or folder
-		if err == nil && respDestinationLookupEntry.Entry != nil && respDestinationLookupEntry.Entry.IsDirectory {
+		if err == nil && respDestinationLookupEntry.Entry.IsDirectory {
 			// to a directory
-			targetDir = filepath.ToSlash(filepath.Join(destinationDir, destinationName))
+			targetDir = util.Join(destinationDir, destinationName)
 			targetName = sourceName
 		} else {
 			// to a file or folder
@@ -82,7 +81,7 @@ func (c *commandFsMv) Do(args []string, commandEnv *CommandEnv, writer io.Writer
 
 		_, err = client.AtomicRenameEntry(context.Background(), request)
 
-		fmt.Fprintf(writer, "move: %s => %s\n", sourcePath, filer2.NewFullPath(targetDir, targetName))
+		fmt.Fprintf(writer, "move: %s => %s\n", sourcePath, util.NewFullPath(targetDir, targetName))
 
 		return err
 

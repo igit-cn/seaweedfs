@@ -1,14 +1,13 @@
 package shell
 
 import (
-	"context"
 	"fmt"
 	"io"
 
 	"github.com/golang/protobuf/jsonpb"
 
-	"github.com/chrislusf/seaweedfs/weed/filer2"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
+	"github.com/chrislusf/seaweedfs/weed/util"
 )
 
 func init() {
@@ -27,34 +26,27 @@ func (c *commandFsMetaCat) Help() string {
 
 	fs.meta.cat /dir/
 	fs.meta.cat /dir/file_name
-	fs.meta.cat http://<filer_server>:<port>/dir/
-	fs.meta.cat http://<filer_server>:<port>/dir/file_name
 `
 }
 
 func (c *commandFsMetaCat) Do(args []string, commandEnv *CommandEnv, writer io.Writer) (err error) {
 
-	input := findInputDirectory(args)
-
-	filerServer, filerPort, path, err := commandEnv.parseUrl(input)
+	path, err := commandEnv.parseUrl(findInputDirectory(args))
 	if err != nil {
 		return err
 	}
 
-	dir, name := filer2.FullPath(path).DirAndName()
+	dir, name := util.FullPath(path).DirAndName()
 
-	return commandEnv.withFilerClient(filerServer, filerPort, func(client filer_pb.SeaweedFilerClient) error {
+	return commandEnv.WithFilerClient(func(client filer_pb.SeaweedFilerClient) error {
 
 		request := &filer_pb.LookupDirectoryEntryRequest{
 			Name:      name,
 			Directory: dir,
 		}
-		respLookupEntry, err := client.LookupDirectoryEntry(context.Background(), request)
+		respLookupEntry, err := filer_pb.LookupEntry(client, request)
 		if err != nil {
 			return err
-		}
-		if respLookupEntry.Entry == nil {
-			return fmt.Errorf("file not found: %s", path)
 		}
 
 		m := jsonpb.Marshaler{

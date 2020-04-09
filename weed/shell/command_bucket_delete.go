@@ -1,7 +1,6 @@
 package shell
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -39,33 +38,17 @@ func (c *commandBucketDelete) Do(args []string, commandEnv *CommandEnv, writer i
 		return fmt.Errorf("empty bucket name")
 	}
 
-	filerServer, filerPort, _, parseErr := commandEnv.parseUrl(findInputDirectory(bucketCommand.Args()))
+	_, parseErr := commandEnv.parseUrl(findInputDirectory(bucketCommand.Args()))
 	if parseErr != nil {
 		return parseErr
 	}
 
-	err = commandEnv.withFilerClient(filerServer, filerPort, func(client filer_pb.SeaweedFilerClient) error {
+	var filerBucketsPath string
+	filerBucketsPath, err = readFilerBucketsPath(commandEnv)
+	if err != nil {
+		return fmt.Errorf("read buckets: %v", err)
+	}
 
-		resp, err := client.GetFilerConfiguration(context.Background(), &filer_pb.GetFilerConfigurationRequest{})
-		if err != nil {
-			return fmt.Errorf("get filer %s:%d configuration: %v", filerServer, filerPort, err)
-		}
-		filerBucketsPath := resp.DirBuckets
-
-		if _, err := client.DeleteEntry(context.Background(), &filer_pb.DeleteEntryRequest{
-			Directory:            filerBucketsPath,
-			Name:                 *bucketName,
-			IsDeleteData:         false,
-			IsRecursive:          true,
-			IgnoreRecursiveError: true,
-		}); err != nil {
-			return err
-		}
-
-		return nil
-
-	})
-
-	return err
+	return filer_pb.Remove(commandEnv, filerBucketsPath, *bucketName, false, true, true)
 
 }

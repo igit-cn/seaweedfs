@@ -12,6 +12,7 @@ import (
 	"github.com/chrislusf/seaweedfs/weed/pb"
 	"github.com/chrislusf/seaweedfs/weed/pb/master_pb"
 	"github.com/chrislusf/seaweedfs/weed/stats"
+	"github.com/chrislusf/seaweedfs/weed/storage/erasure_coding"
 	"github.com/chrislusf/seaweedfs/weed/storage/needle"
 	"github.com/chrislusf/seaweedfs/weed/storage/super_block"
 	. "github.com/chrislusf/seaweedfs/weed/storage/types"
@@ -99,6 +100,9 @@ func (s *Store) FindFreeLocation() (ret *DiskLocation) {
 	max := 0
 	for _, location := range s.Locations {
 		currentFreeCount := location.MaxVolumeCount - location.VolumesLen()
+		currentFreeCount *= erasure_coding.DataShardsCount
+		currentFreeCount -= location.EcVolumesLen()
+		currentFreeCount /= erasure_coding.DataShardsCount
 		if currentFreeCount > max {
 			max = currentFreeCount
 			ret = location
@@ -131,31 +135,52 @@ func (s *Store) addVolume(vid needle.VolumeId, collection string, needleMapKind 
 	return fmt.Errorf("No more free space left")
 }
 
-func (s *Store) VolumeInfos() []*VolumeInfo {
-	var stats []*VolumeInfo
+func (s *Store) VolumeInfos() (allStats []*VolumeInfo) {
 	for _, location := range s.Locations {
-		location.volumesLock.RLock()
-		for k, v := range location.volumes {
-			s := &VolumeInfo{
-				Id:               needle.VolumeId(k),
-				Size:             v.ContentSize(),
-				Collection:       v.Collection,
-				ReplicaPlacement: v.ReplicaPlacement,
-				Version:          v.Version(),
-				FileCount:        int(v.FileCount()),
-				DeleteCount:      int(v.DeletedCount()),
-				DeletedByteCount: v.DeletedSize(),
-				ReadOnly:         v.noWriteOrDelete || v.noWriteCanDelete,
-				Ttl:              v.Ttl,
-				CompactRevision:  uint32(v.CompactionRevision),
-			}
-			s.RemoteStorageName, s.RemoteStorageKey = v.RemoteStorageNameKey()
-			stats = append(stats, s)
-		}
-		location.volumesLock.RUnlock()
+		stats := collectStatsForOneLocation(location)
+		allStats = append(allStats, stats...)
 	}
-	sortVolumeInfos(stats)
+	sortVolumeInfos(allStats)
+	return allStats
+}
+
+func collectStatsForOneLocation(location *DiskLocation) (stats []*VolumeInfo) {
+	location.volumesLock.RLock()
+	defer location.volumesLock.RUnlock()
+
+	for k, v := range location.volumes {
+		s := collectStatForOneVolume(k, v)
+		stats = append(stats, s)
+	}
 	return stats
+}
+
+func collectStatForOneVolume(vid needle.VolumeId, v *Volume) (s *VolumeInfo) {
+
+	s = &VolumeInfo{
+		Id:               vid,
+		Collection:       v.Collection,
+		ReplicaPlacement: v.ReplicaPlacement,
+		Version:          v.Version(),
+		ReadOnly:         v.IsReadOnly(),
+		Ttl:              v.Ttl,
+		CompactRevision:  uint32(v.CompactionRevision),
+	}
+	s.RemoteStorageName, s.RemoteStorageKey = v.RemoteStorageNameKey()
+
+	v.dataFileAccessLock.RLock()
+	defer v.dataFileAccessLock.RUnlock()
+
+	if v.nm == nil {
+		return
+	}
+
+	s.FileCount = v.nm.FileCount()
+	s.DeleteCount = v.nm.DeletedCount()
+	s.DeletedByteCount = v.nm.DeletedSize()
+	s.Size = v.nm.ContentSize()
+
+	return
 }
 
 func (s *Store) SetDataCenter(dataCenter string) {
@@ -227,14 +252,15 @@ func (s *Store) Close() {
 	}
 }
 
-func (s *Store) WriteVolumeNeedle(i needle.VolumeId, n *needle.Needle) (size uint32, isUnchanged bool, err error) {
+func (s *Store) WriteVolumeNeedle(i needle.VolumeId, n *needle.Needle) (isUnchanged bool, err error) {
 	if v := s.findVolume(i); v != nil {
-		if v.noWriteOrDelete || v.noWriteCanDelete {
+		if v.IsReadOnly() {
 			err = fmt.Errorf("volume %d is read only", i)
 			return
 		}
-		if MaxPossibleVolumeSize >= v.ContentSize()+uint64(needle.GetActualSize(size, v.Version())) {
-			_, size, isUnchanged, err = v.writeNeedle(n)
+		// using len(n.Data) here instead of n.Size before n.Size is populated in v.writeNeedle(n)
+		if MaxPossibleVolumeSize >= v.ContentSize()+uint64(needle.GetActualSize(uint32(len(n.Data)), v.Version())) {
+			_, _, isUnchanged, err = v.writeNeedle(n)
 		} else {
 			err = fmt.Errorf("volume size limit %d exceeded! current size is %d", s.GetVolumeSizeLimit(), v.ContentSize())
 		}
@@ -380,4 +406,25 @@ func (s *Store) SetVolumeSizeLimit(x uint64) {
 
 func (s *Store) GetVolumeSizeLimit() uint64 {
 	return atomic.LoadUint64(&s.volumeSizeLimit)
+}
+
+func (s *Store) MaybeAdjustVolumeMax() (hasChanges bool) {
+	volumeSizeLimit := s.GetVolumeSizeLimit()
+	for _, diskLocation := range s.Locations {
+		if diskLocation.MaxVolumeCount == 0 {
+			diskStatus := stats.NewDiskStatus(diskLocation.Directory)
+			unusedSpace := diskLocation.UnUsedSpace(volumeSizeLimit)
+			unclaimedSpaces := int64(diskStatus.Free) - int64(unusedSpace)
+			volCount := diskLocation.VolumesLen()
+			maxVolumeCount := volCount
+			if unclaimedSpaces > int64(volumeSizeLimit) {
+				maxVolumeCount += int(uint64(unclaimedSpaces)/volumeSizeLimit) - 1
+			}
+			diskLocation.MaxVolumeCount = maxVolumeCount
+			glog.V(0).Infof("disk %s max %d unclaimedSpace:%dMB, unused:%dMB volumeSizeLimit:%d/MB",
+				diskLocation.Directory, maxVolumeCount, unclaimedSpaces/1024/1024, unusedSpace/1024/1024, volumeSizeLimit/1024/1024)
+			hasChanges = true
+		}
+	}
+	return
 }

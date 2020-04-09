@@ -10,6 +10,7 @@ import (
 
 	"github.com/chrislusf/seaweedfs/weed/filer2"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
+	"github.com/chrislusf/seaweedfs/weed/util"
 )
 
 func init() {
@@ -29,9 +30,6 @@ func (c *commandFsLs) Help() string {
 	fs.ls [-l] [-a] /dir/
 	fs.ls [-l] [-a] /dir/file_name
 	fs.ls [-l] [-a] /dir/file_prefix
-	fs.ls [-l] [-a] http://<filer_server>:<port>/dir/
-	fs.ls [-l] [-a] http://<filer_server>:<port>/dir/file_name
-	fs.ls [-l] [-a] http://<filer_server>:<port>/dir/file_prefix
 `
 }
 
@@ -52,21 +50,19 @@ func (c *commandFsLs) Do(args []string, commandEnv *CommandEnv, writer io.Writer
 		}
 	}
 
-	input := findInputDirectory(args)
-
-	filerServer, filerPort, path, err := commandEnv.parseUrl(input)
+	path, err := commandEnv.parseUrl(findInputDirectory(args))
 	if err != nil {
 		return err
 	}
 
-	if commandEnv.isDirectory(filerServer, filerPort, path) {
+	if commandEnv.isDirectory(path) {
 		path = path + "/"
 	}
 
-	dir, name := filer2.FullPath(path).DirAndName()
+	dir, name := util.FullPath(path).DirAndName()
 	entryCount := 0
 
-	err = filer2.ReadDirAllEntries(commandEnv.getFilerClient(filerServer, filerPort), filer2.FullPath(dir), name, func(entry *filer_pb.Entry, isLast bool) {
+	err = filer_pb.ReadDirAllEntries(commandEnv, util.FullPath(dir), name, func(entry *filer_pb.Entry, isLast bool) {
 
 		if !showHidden && strings.HasPrefix(entry.Name, ".") {
 			return

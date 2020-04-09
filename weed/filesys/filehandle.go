@@ -3,6 +3,7 @@ package filesys
 import (
 	"context"
 	"fmt"
+	"math"
 	"mime"
 	"path"
 	"time"
@@ -28,15 +29,20 @@ type FileHandle struct {
 	NodeId    fuse.NodeID    // file or directory the request is about
 	Uid       uint32         // user ID of process making request
 	Gid       uint32         // group ID of process making request
+
 }
 
 func newFileHandle(file *File, uid, gid uint32) *FileHandle {
-	return &FileHandle{
+	fh := &FileHandle{
 		f:          file,
 		dirtyPages: newDirtyPages(file),
 		Uid:        uid,
 		Gid:        gid,
 	}
+	if fh.f.entry != nil {
+		fh.f.entry.Attributes.FileSize = filer2.TotalSize(fh.f.entry.Chunks)
+	}
+	return fh
 }
 
 var _ = fs.Handle(&FileHandle{})
@@ -85,17 +91,23 @@ func (fh *FileHandle) readFromChunks(buff []byte, offset int64) (int64, error) {
 
 	if fh.f.entryViewCache == nil {
 		fh.f.entryViewCache = filer2.NonOverlappingVisibleIntervals(fh.f.entry.Chunks)
+		fh.f.reader = nil
 	}
 
-	chunkViews := filer2.ViewFromVisibleIntervals(fh.f.entryViewCache, offset, len(buff))
+	if fh.f.reader == nil {
+		chunkViews := filer2.ViewFromVisibleIntervals(fh.f.entryViewCache, 0, math.MaxInt32)
+		fh.f.reader = filer2.NewChunkReaderAtFromClient(fh.f.wfs, chunkViews, fh.f.wfs.chunkCache)
+	}
 
-	totalRead, err := filer2.ReadIntoBuffer(fh.f.wfs, fh.f.fullpath(), buff, chunkViews, offset)
+	totalRead, err := fh.f.reader.ReadAt(buff, offset)
 
 	if err != nil {
 		glog.Errorf("file handle read %s: %v", fh.f.fullpath(), err)
 	}
 
-	return totalRead, err
+	// glog.V(0).Infof("file handle read %s [%d,%d] %d : %v", fh.f.fullpath(), offset, offset+int64(totalRead), totalRead, err)
+
+	return int64(totalRead), err
 }
 
 // Write to the file handle
@@ -145,6 +157,8 @@ func (fh *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) err
 		fh.dirtyPages.releaseResource()
 		fh.f.wfs.ReleaseHandle(fh.f.fullpath(), fuse.HandleID(fh.handle))
 	}
+	fh.f.entryViewCache = nil
+	fh.f.reader = nil
 
 	return nil
 }
@@ -160,8 +174,8 @@ func (fh *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 		return fuse.EIO
 	}
 
-	fh.f.addChunks(chunks)
 	if len(chunks) > 0 {
+		fh.f.addChunks(chunks)
 		fh.dirtyMetadata = true
 	}
 
@@ -183,7 +197,7 @@ func (fh *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 		}
 
 		request := &filer_pb.CreateEntryRequest{
-			Directory: fh.f.dir.Path,
+			Directory: fh.f.dir.FullPath(),
 			Entry:     fh.f.entry,
 		}
 

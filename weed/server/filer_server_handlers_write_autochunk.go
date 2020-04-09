@@ -2,7 +2,9 @@ package weed_server
 
 import (
 	"context"
+	"crypto/md5"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"path"
 	"strconv"
@@ -19,7 +21,7 @@ import (
 )
 
 func (fs *FilerServer) autoChunk(ctx context.Context, w http.ResponseWriter, r *http.Request,
-	replication string, collection string, dataCenter string) bool {
+	replication string, collection string, dataCenter string, ttlSec int32, ttlString string) bool {
 	if r.Method != "POST" {
 		glog.V(4).Infoln("AutoChunking not supported for method", r.Method)
 		return false
@@ -55,7 +57,7 @@ func (fs *FilerServer) autoChunk(ctx context.Context, w http.ResponseWriter, r *
 		return false
 	}
 
-	reply, err := fs.doAutoChunk(ctx, w, r, contentLength, chunkSize, replication, collection, dataCenter)
+	reply, err := fs.doAutoChunk(ctx, w, r, contentLength, chunkSize, replication, collection, dataCenter, ttlSec, ttlString)
 	if err != nil {
 		writeJsonError(w, r, http.StatusInternalServerError, err)
 	} else if reply != nil {
@@ -65,7 +67,7 @@ func (fs *FilerServer) autoChunk(ctx context.Context, w http.ResponseWriter, r *
 }
 
 func (fs *FilerServer) doAutoChunk(ctx context.Context, w http.ResponseWriter, r *http.Request,
-	contentLength int64, chunkSize int32, replication string, collection string, dataCenter string) (filerResult *FilerPostResult, replyerr error) {
+	contentLength int64, chunkSize int32, replication string, collection string, dataCenter string, ttlSec int32, ttlString string) (filerResult *FilerPostResult, replyerr error) {
 
 	stats.FilerRequestCounter.WithLabelValues("postAutoChunk").Inc()
 	start := time.Now()
@@ -87,49 +89,55 @@ func (fs *FilerServer) doAutoChunk(ctx context.Context, w http.ResponseWriter, r
 	if fileName != "" {
 		fileName = path.Base(fileName)
 	}
+	contentType := part1.Header.Get("Content-Type")
 
 	var fileChunks []*filer_pb.FileChunk
+
+	md5Hash := md5.New()
+	var partReader = ioutil.NopCloser(io.TeeReader(part1, md5Hash))
 
 	chunkOffset := int64(0)
 
 	for chunkOffset < contentLength {
-		limitedReader := io.LimitReader(part1, int64(chunkSize))
+		limitedReader := io.LimitReader(partReader, int64(chunkSize))
 
 		// assign one file id for one chunk
-		fileId, urlLocation, auth, assignErr := fs.assignNewFileInfo(w, r, replication, collection, dataCenter)
+		fileId, urlLocation, auth, assignErr := fs.assignNewFileInfo(w, r, replication, collection, dataCenter, ttlString)
 		if assignErr != nil {
 			return nil, assignErr
 		}
 
 		// upload the chunk to the volume server
-		chunkName := fileName + "_chunk_" + strconv.FormatInt(int64(len(fileChunks)+1), 10)
-		uploadedSize, uploadErr := fs.doUpload(urlLocation, w, r, limitedReader, chunkName, "", fileId, auth)
+		uploadResult, uploadErr := fs.doUpload(urlLocation, w, r, limitedReader, fileName, contentType, nil, auth)
 		if uploadErr != nil {
 			return nil, uploadErr
 		}
 
 		// if last chunk exhausted the reader exactly at the border
-		if uploadedSize == 0 {
+		if uploadResult.Size == 0 {
 			break
 		}
 
 		// Save to chunk manifest structure
 		fileChunks = append(fileChunks,
 			&filer_pb.FileChunk{
-				FileId: fileId,
-				Offset: chunkOffset,
-				Size:   uint64(uploadedSize),
-				Mtime:  time.Now().UnixNano(),
+				FileId:    fileId,
+				Offset:    chunkOffset,
+				Size:      uint64(uploadResult.Size),
+				Mtime:     time.Now().UnixNano(),
+				ETag:      uploadResult.ETag,
+				CipherKey: uploadResult.CipherKey,
+				IsGzipped: uploadResult.Gzip > 0,
 			},
 		)
 
-		glog.V(4).Infof("uploaded %s chunk %d to %s [%d,%d) of %d", fileName, len(fileChunks), fileId, chunkOffset, chunkOffset+int64(uploadedSize), contentLength)
+		glog.V(4).Infof("uploaded %s chunk %d to %s [%d,%d) of %d", fileName, len(fileChunks), fileId, chunkOffset, chunkOffset+int64(uploadResult.Size), contentLength)
 
 		// reset variables for the next chunk
-		chunkOffset = chunkOffset + int64(uploadedSize)
+		chunkOffset = chunkOffset + int64(uploadResult.Size)
 
 		// if last chunk was not at full chunk size, but already exhausted the reader
-		if uploadedSize < int64(chunkSize) {
+		if int64(uploadResult.Size) < int64(chunkSize) {
 			break
 		}
 	}
@@ -143,7 +151,7 @@ func (fs *FilerServer) doAutoChunk(ctx context.Context, w http.ResponseWriter, r
 
 	glog.V(4).Infoln("saving", path)
 	entry := &filer2.Entry{
-		FullPath: filer2.FullPath(path),
+		FullPath: util.FullPath(path),
 		Attr: filer2.Attr{
 			Mtime:       time.Now(),
 			Crtime:      time.Now(),
@@ -152,7 +160,9 @@ func (fs *FilerServer) doAutoChunk(ctx context.Context, w http.ResponseWriter, r
 			Gid:         OS_GID,
 			Replication: replication,
 			Collection:  collection,
-			TtlSec:      int32(util.ParseInt(r.URL.Query().Get("ttl"), 0)),
+			TtlSec:      ttlSec,
+			Mime:        contentType,
+			Md5:         md5Hash.Sum(nil),
 		},
 		Chunks: fileChunks,
 	}
@@ -173,8 +183,7 @@ func (fs *FilerServer) doAutoChunk(ctx context.Context, w http.ResponseWriter, r
 	return
 }
 
-func (fs *FilerServer) doUpload(urlLocation string, w http.ResponseWriter, r *http.Request,
-	limitedReader io.Reader, fileName string, contentType string, fileId string, auth security.EncodedJwt) (size int64, err error) {
+func (fs *FilerServer) doUpload(urlLocation string, w http.ResponseWriter, r *http.Request, limitedReader io.Reader, fileName string, contentType string, pairMap map[string]string, auth security.EncodedJwt) (*operation.UploadResult, error) {
 
 	stats.FilerRequestCounter.WithLabelValues("postAutoChunkUpload").Inc()
 	start := time.Now()
@@ -182,9 +191,6 @@ func (fs *FilerServer) doUpload(urlLocation string, w http.ResponseWriter, r *ht
 		stats.FilerRequestHistogram.WithLabelValues("postAutoChunkUpload").Observe(time.Since(start).Seconds())
 	}()
 
-	uploadResult, uploadError := operation.Upload(urlLocation, fileName, limitedReader, false, contentType, nil, auth)
-	if uploadError != nil {
-		return 0, uploadError
-	}
-	return int64(uploadResult.Size), nil
+	uploadResult, err, _ := operation.Upload(urlLocation, fileName, fs.option.Cipher, limitedReader, false, contentType, pairMap, auth)
+	return uploadResult, err
 }

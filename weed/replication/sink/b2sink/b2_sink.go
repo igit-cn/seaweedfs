@@ -85,7 +85,7 @@ func (g *B2Sink) CreateEntry(key string, entry *filer_pb.Entry) error {
 	}
 
 	totalSize := filer2.TotalSize(entry.Chunks)
-	chunkViews := filer2.ViewFromChunks(entry.Chunks, 0, int(totalSize))
+	chunkViews := filer2.ViewFromChunks(entry.Chunks, 0, int64(totalSize))
 
 	bucket, err := g.client.Bucket(context.Background(), g.bucket)
 	if err != nil {
@@ -103,7 +103,7 @@ func (g *B2Sink) CreateEntry(key string, entry *filer_pb.Entry) error {
 		}
 
 		var writeErr error
-		_, readErr := util.ReadUrlAsStream(fileUrl, chunk.Offset, int(chunk.Size), func(data []byte) {
+		readErr := util.ReadUrlAsStream(fileUrl, nil, false, chunk.IsFullChunk, chunk.Offset, int(chunk.Size), func(data []byte) {
 			_, err := writer.Write(data)
 			if err != nil {
 				writeErr = err

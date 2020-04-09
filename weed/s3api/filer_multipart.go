@@ -107,12 +107,12 @@ func (s3a *S3ApiServer) completeMultipartUpload(input *s3.CompleteMultipartUploa
 		CompleteMultipartUploadOutput: s3.CompleteMultipartUploadOutput{
 			Location: aws.String(fmt.Sprintf("http://%s%s/%s", s3a.option.Filer, dirName, entryName)),
 			Bucket:   input.Bucket,
-			ETag:     aws.String("\"" + filer2.ETag(finalParts) + "\""),
+			ETag:     aws.String("\"" + filer2.ETagChunks(finalParts) + "\""),
 			Key:      objectKey(input.Key),
 		},
 	}
 
-	if err = s3a.rm(s3a.genUploadsFolder(*input.Bucket), *input.UploadId, true, false, true); err != nil {
+	if err = s3a.rm(s3a.genUploadsFolder(*input.Bucket), *input.UploadId, false, true); err != nil {
 		glog.V(1).Infof("completeMultipartUpload cleanup %s upload %s: %v", *input.Bucket, *input.UploadId, err)
 	}
 
@@ -127,7 +127,7 @@ func (s3a *S3ApiServer) abortMultipartUpload(input *s3.AbortMultipartUploadInput
 		return nil, ErrNoSuchUpload
 	}
 	if exists {
-		err = s3a.rm(s3a.genUploadsFolder(*input.Bucket), *input.UploadId, true, true, true)
+		err = s3a.rm(s3a.genUploadsFolder(*input.Bucket), *input.UploadId, true, true)
 	}
 	if err != nil {
 		glog.V(1).Infof("bucket %s remove upload %s: %v", *input.Bucket, *input.UploadId, err)
@@ -155,7 +155,7 @@ func (s3a *S3ApiServer) listMultipartUploads(input *s3.ListMultipartUploadsInput
 		},
 	}
 
-	entries, err := s3a.list(s3a.genUploadsFolder(*input.Bucket), *input.Prefix, *input.KeyMarker, true, int(*input.MaxUploads))
+	entries, err := s3a.list(s3a.genUploadsFolder(*input.Bucket), *input.Prefix, *input.KeyMarker, true, uint32(*input.MaxUploads))
 	if err != nil {
 		glog.Errorf("listMultipartUploads %s error: %v", *input.Bucket, err)
 		return
@@ -190,7 +190,7 @@ func (s3a *S3ApiServer) listObjectParts(input *s3.ListPartsInput) (output *ListP
 		},
 	}
 
-	entries, err := s3a.list(s3a.genUploadsFolder(*input.Bucket)+"/"+*input.UploadId, "", fmt.Sprintf("%04d.part", *input.PartNumberMarker), false, int(*input.MaxParts))
+	entries, err := s3a.list(s3a.genUploadsFolder(*input.Bucket)+"/"+*input.UploadId, "", fmt.Sprintf("%04d.part", *input.PartNumberMarker), false, uint32(*input.MaxParts))
 	if err != nil {
 		glog.Errorf("listObjectParts %s %s error: %v", *input.Bucket, *input.UploadId, err)
 		return nil, ErrNoSuchUpload
@@ -208,7 +208,7 @@ func (s3a *S3ApiServer) listObjectParts(input *s3.ListPartsInput) (output *ListP
 				PartNumber:   aws.Int64(int64(partNumber)),
 				LastModified: aws.Time(time.Unix(entry.Attributes.Mtime, 0)),
 				Size:         aws.Int64(int64(filer2.TotalSize(entry.Chunks))),
-				ETag:         aws.String("\"" + filer2.ETag(entry.Chunks) + "\""),
+				ETag:         aws.String("\"" + filer2.ETag(entry) + "\""),
 			})
 		}
 	}

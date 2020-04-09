@@ -12,26 +12,28 @@ import (
 	"github.com/karlseguin/ccache"
 	"google.golang.org/grpc"
 
-	"github.com/chrislusf/seaweedfs/weed/filer2"
 	"github.com/chrislusf/seaweedfs/weed/glog"
+	"github.com/chrislusf/seaweedfs/weed/pb"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
+	"github.com/chrislusf/seaweedfs/weed/pb/pb_cache"
 	"github.com/chrislusf/seaweedfs/weed/util"
 	"github.com/seaweedfs/fuse"
 	"github.com/seaweedfs/fuse/fs"
 )
 
 type Option struct {
-	FilerGrpcAddress   string
-	GrpcDialOption     grpc.DialOption
-	FilerMountRootPath string
-	Collection         string
-	Replication        string
-	TtlSec             int32
-	ChunkSizeLimit     int64
-	DataCenter         string
-	DirListCacheLimit  int64
-	EntryCacheTtl      time.Duration
-	Umask              os.FileMode
+	FilerGrpcAddress     string
+	GrpcDialOption       grpc.DialOption
+	FilerMountRootPath   string
+	Collection           string
+	Replication          string
+	TtlSec               int32
+	ChunkSizeLimit       int64
+	ChunkCacheCountLimit int64
+	DataCenter           string
+	DirListCacheLimit    int64
+	EntryCacheTtl        time.Duration
+	Umask                os.FileMode
 
 	MountUid   uint32
 	MountGid   uint32
@@ -39,8 +41,9 @@ type Option struct {
 	MountCtime time.Time
 	MountMtime time.Time
 
-	// whether the mount runs outside SeaweedFS containers
-	OutsideContainerClusterMode bool
+	OutsideContainerClusterMode bool // whether the mount runs outside SeaweedFS containers
+	Cipher                      bool // whether encrypt data on volume server
+
 }
 
 var _ = fs.FS(&WFS{})
@@ -51,18 +54,17 @@ type WFS struct {
 	listDirectoryEntriesCache *ccache.Cache
 
 	// contains all open handles, protected by handlesLock
-	handlesLock       sync.Mutex
-	handles           []*FileHandle
-	pathToHandleIndex map[filer2.FullPath]int
+	handlesLock sync.Mutex
+	handles     map[uint64]*FileHandle
 
 	bufPool sync.Pool
 
 	stats statsCache
 
-	// nodes, protected by nodesLock
-	nodesLock sync.Mutex
-	nodes     map[uint64]fs.Node
-	root      fs.Node
+	root        fs.Node
+	fsNodeCache *FsCache
+
+	chunkCache *pb_cache.ChunkCache
 }
 type statsCache struct {
 	filer_pb.StatisticsResponse
@@ -73,16 +75,17 @@ func NewSeaweedFileSystem(option *Option) *WFS {
 	wfs := &WFS{
 		option:                    option,
 		listDirectoryEntriesCache: ccache.New(ccache.Configure().MaxSize(option.DirListCacheLimit * 3).ItemsToPrune(100)),
-		pathToHandleIndex:         make(map[filer2.FullPath]int),
+		handles:                   make(map[uint64]*FileHandle),
 		bufPool: sync.Pool{
 			New: func() interface{} {
 				return make([]byte, option.ChunkSizeLimit)
 			},
 		},
-		nodes: make(map[uint64]fs.Node),
+		chunkCache: pb_cache.NewChunkCache(option.ChunkCacheCountLimit),
 	}
 
-	wfs.root = &Dir{Path: wfs.option.FilerMountRootPath, wfs: wfs}
+	wfs.root = &Dir{name: wfs.option.FilerMountRootPath, wfs: wfs}
+	wfs.fsNodeCache = newFsCache(wfs.root)
 
 	return wfs
 }
@@ -93,7 +96,7 @@ func (wfs *WFS) Root() (fs.Node, error) {
 
 func (wfs *WFS) WithFilerClient(fn func(filer_pb.SeaweedFilerClient) error) error {
 
-	err := util.WithCachedGrpcClient(func(grpcConnection *grpc.ClientConn) error {
+	err := pb.WithCachedGrpcClient(func(grpcConnection *grpc.ClientConn) error {
 		client := filer_pb.NewSeaweedFilerClient(grpcConnection)
 		return fn(client)
 	}, wfs.option.FilerGrpcAddress, wfs.option.GrpcDialOption)
@@ -113,40 +116,27 @@ func (wfs *WFS) AcquireHandle(file *File, uid, gid uint32) (fileHandle *FileHand
 	wfs.handlesLock.Lock()
 	defer wfs.handlesLock.Unlock()
 
-	index, found := wfs.pathToHandleIndex[fullpath]
-	if found && wfs.handles[index] != nil {
-		glog.V(2).Infoln(fullpath, "found fileHandle id", index)
-		return wfs.handles[index]
+	inodeId := file.fullpath().AsInode()
+	existingHandle, found := wfs.handles[inodeId]
+	if found && existingHandle != nil {
+		return existingHandle
 	}
 
 	fileHandle = newFileHandle(file, uid, gid)
-	for i, h := range wfs.handles {
-		if h == nil {
-			wfs.handles[i] = fileHandle
-			fileHandle.handle = uint64(i)
-			wfs.pathToHandleIndex[fullpath] = i
-			glog.V(4).Infof("%s reuse fh %d", fullpath, fileHandle.handle)
-			return
-		}
-	}
-
-	wfs.handles = append(wfs.handles, fileHandle)
-	fileHandle.handle = uint64(len(wfs.handles) - 1)
-	wfs.pathToHandleIndex[fullpath] = int(fileHandle.handle)
+	wfs.handles[inodeId] = fileHandle
+	fileHandle.handle = inodeId
 	glog.V(4).Infof("%s new fh %d", fullpath, fileHandle.handle)
 
 	return
 }
 
-func (wfs *WFS) ReleaseHandle(fullpath filer2.FullPath, handleId fuse.HandleID) {
+func (wfs *WFS) ReleaseHandle(fullpath util.FullPath, handleId fuse.HandleID) {
 	wfs.handlesLock.Lock()
 	defer wfs.handlesLock.Unlock()
 
 	glog.V(4).Infof("%s ReleaseHandle id %d current handles length %d", fullpath, handleId, len(wfs.handles))
-	delete(wfs.pathToHandleIndex, fullpath)
-	if int(handleId) < len(wfs.handles) {
-		wfs.handles[int(handleId)] = nil
-	}
+
+	delete(wfs.handles, fullpath.AsInode())
 
 	return
 }
@@ -213,44 +203,22 @@ func (wfs *WFS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.
 	return nil
 }
 
-func (wfs *WFS) cacheGet(path filer2.FullPath) *filer_pb.Entry {
+func (wfs *WFS) cacheGet(path util.FullPath) *filer_pb.Entry {
 	item := wfs.listDirectoryEntriesCache.Get(string(path))
 	if item != nil && !item.Expired() {
 		return item.Value().(*filer_pb.Entry)
 	}
 	return nil
 }
-func (wfs *WFS) cacheSet(path filer2.FullPath, entry *filer_pb.Entry, ttl time.Duration) {
+func (wfs *WFS) cacheSet(path util.FullPath, entry *filer_pb.Entry, ttl time.Duration) {
 	if entry == nil {
 		wfs.listDirectoryEntriesCache.Delete(string(path))
 	} else {
 		wfs.listDirectoryEntriesCache.Set(string(path), entry, ttl)
 	}
 }
-func (wfs *WFS) cacheDelete(path filer2.FullPath) {
+func (wfs *WFS) cacheDelete(path util.FullPath) {
 	wfs.listDirectoryEntriesCache.Delete(string(path))
-}
-
-func (wfs *WFS) getNode(fullpath filer2.FullPath, fn func() fs.Node) fs.Node {
-	wfs.nodesLock.Lock()
-	defer wfs.nodesLock.Unlock()
-
-	node, found := wfs.nodes[fullpath.AsInode()]
-	if found {
-		return node
-	}
-	node = fn()
-	if node != nil {
-		wfs.nodes[fullpath.AsInode()] = node
-	}
-	return node
-}
-
-func (wfs *WFS) forgetNode(fullpath filer2.FullPath) {
-	wfs.nodesLock.Lock()
-	defer wfs.nodesLock.Unlock()
-
-	delete(wfs.nodes, fullpath.AsInode())
 }
 
 func (wfs *WFS) AdjustedUrl(hostAndPort string) string {

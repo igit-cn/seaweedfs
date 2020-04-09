@@ -1,4 +1,4 @@
-package util
+package pb
 
 import (
 	"context"
@@ -11,6 +11,13 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
+
+	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
+	"github.com/chrislusf/seaweedfs/weed/pb/master_pb"
+)
+
+const (
+	Max_Message_Size = 1 << 30 // 1 GB
 )
 
 var (
@@ -25,13 +32,18 @@ func init() {
 
 func NewGrpcServer(opts ...grpc.ServerOption) *grpc.Server {
 	var options []grpc.ServerOption
-	options = append(options, grpc.KeepaliveParams(keepalive.ServerParameters{
-		Time:    10 * time.Second, // wait time before ping if no activity
-		Timeout: 20 * time.Second, // ping timeout
-	}), grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
-		MinTime:             60 * time.Second, // min time a client should wait before sending a ping
-		PermitWithoutStream: true,
-	}))
+	options = append(options,
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    10 * time.Second, // wait time before ping if no activity
+			Timeout: 20 * time.Second, // ping timeout
+		}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             60 * time.Second, // min time a client should wait before sending a ping
+			PermitWithoutStream: true,
+		}),
+		grpc.MaxRecvMsgSize(Max_Message_Size),
+		grpc.MaxSendMsgSize(Max_Message_Size),
+	)
 	for _, opt := range opts {
 		if opt != nil {
 			options = append(options, opt)
@@ -46,6 +58,10 @@ func GrpcDial(ctx context.Context, address string, opts ...grpc.DialOption) (*gr
 	var options []grpc.DialOption
 	options = append(options,
 		// grpc.WithInsecure(),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallSendMsgSize(Max_Message_Size),
+			grpc.MaxCallRecvMsgSize(Max_Message_Size),
+		),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                30 * time.Second, // client ping server if no activity for this long
 			Timeout:             20 * time.Second,
@@ -126,4 +142,54 @@ func ServerToGrpcAddress(server string) (serverGrpcAddress string) {
 	grpcPort := int(port) + 10000
 
 	return fmt.Sprintf("%s:%d", hostnameAndPort[0], grpcPort)
+}
+
+func WithMasterClient(master string, grpcDialOption grpc.DialOption, fn func(client master_pb.SeaweedClient) error) error {
+
+	masterGrpcAddress, parseErr := ParseServerToGrpcAddress(master)
+	if parseErr != nil {
+		return fmt.Errorf("failed to parse master grpc %v: %v", master, parseErr)
+	}
+
+	return WithCachedGrpcClient(func(grpcConnection *grpc.ClientConn) error {
+		client := master_pb.NewSeaweedClient(grpcConnection)
+		return fn(client)
+	}, masterGrpcAddress, grpcDialOption)
+
+}
+
+func WithFilerClient(filer string, grpcDialOption grpc.DialOption, fn func(client filer_pb.SeaweedFilerClient) error) error {
+
+	filerGrpcAddress, parseErr := ParseServerToGrpcAddress(filer)
+	if parseErr != nil {
+		return fmt.Errorf("failed to parse filer grpc %v: %v", filer, parseErr)
+	}
+
+	return WithGrpcFilerClient(filerGrpcAddress, grpcDialOption, fn)
+
+}
+
+func WithGrpcFilerClient(filerGrpcAddress string, grpcDialOption grpc.DialOption, fn func(client filer_pb.SeaweedFilerClient) error) error {
+
+	return WithCachedGrpcClient(func(grpcConnection *grpc.ClientConn) error {
+		client := filer_pb.NewSeaweedFilerClient(grpcConnection)
+		return fn(client)
+	}, filerGrpcAddress, grpcDialOption)
+
+}
+
+func ParseFilerGrpcAddress(filer string) (filerGrpcAddress string, err error) {
+	hostnameAndPort := strings.Split(filer, ":")
+	if len(hostnameAndPort) != 2 {
+		return "", fmt.Errorf("filer should have hostname:port format: %v", hostnameAndPort)
+	}
+
+	filerPort, parseErr := strconv.ParseUint(hostnameAndPort[1], 10, 64)
+	if parseErr != nil {
+		return "", fmt.Errorf("filer port parse error: %v", parseErr)
+	}
+
+	filerGrpcPort := int(filerPort) + 10000
+
+	return fmt.Sprintf("%s:%d", hostnameAndPort[0], filerGrpcPort), nil
 }

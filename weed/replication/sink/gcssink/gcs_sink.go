@@ -6,13 +6,14 @@ import (
 	"os"
 
 	"cloud.google.com/go/storage"
+	"google.golang.org/api/option"
+
 	"github.com/chrislusf/seaweedfs/weed/filer2"
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
 	"github.com/chrislusf/seaweedfs/weed/replication/sink"
 	"github.com/chrislusf/seaweedfs/weed/replication/source"
 	"github.com/chrislusf/seaweedfs/weed/util"
-	"google.golang.org/api/option"
 )
 
 type GcsSink struct {
@@ -89,7 +90,7 @@ func (g *GcsSink) CreateEntry(key string, entry *filer_pb.Entry) error {
 	}
 
 	totalSize := filer2.TotalSize(entry.Chunks)
-	chunkViews := filer2.ViewFromChunks(entry.Chunks, 0, int(totalSize))
+	chunkViews := filer2.ViewFromChunks(entry.Chunks, 0, int64(totalSize))
 
 	wc := g.client.Bucket(g.bucket).Object(key).NewWriter(context.Background())
 
@@ -100,7 +101,7 @@ func (g *GcsSink) CreateEntry(key string, entry *filer_pb.Entry) error {
 			return err
 		}
 
-		_, err = util.ReadUrlAsStream(fileUrl, chunk.Offset, int(chunk.Size), func(data []byte) {
+		err = util.ReadUrlAsStream(fileUrl, nil, false, chunk.IsFullChunk, chunk.Offset, int(chunk.Size), func(data []byte) {
 			wc.Write(data)
 		})
 

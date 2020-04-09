@@ -81,7 +81,7 @@ func setup(topologyLayout string) *Topology {
 	fmt.Println("data:", data)
 
 	//need to connect all nodes first before server adding volumes
-	topo := NewTopology("weedfs", sequence.NewMemorySequencer(), 32*1024, 5)
+	topo := NewTopology("weedfs", sequence.NewMemorySequencer(), 32*1024, 5, false)
 	mTopology := data.(map[string]interface{})
 	for dcKey, dcValue := range mTopology {
 		dc := NewDataCenter(dcKey)
@@ -251,5 +251,92 @@ func TestReplication011(t *testing.T) {
 	}
 	for _, server := range servers {
 		fmt.Println("assigned node :", server.Id())
+	}
+}
+
+var topologyLayout3 = `
+{
+  "dc1":{
+    "rack1":{
+      "server111":{
+        "volumes":[],
+        "limit":2000
+      }
+    }
+  },
+  "dc2":{
+    "rack2":{
+      "server222":{
+        "volumes":[],
+        "limit":2000
+      }
+    }
+  },
+  "dc3":{
+    "rack3":{
+      "server333":{
+        "volumes":[],
+        "limit":1000
+      }
+    }
+  },
+  "dc4":{
+    "rack4":{
+      "server444":{
+        "volumes":[],
+        "limit":1000
+      }
+    }
+  },
+  "dc5":{
+    "rack5":{
+      "server555":{
+        "volumes":[],
+        "limit":500
+      }
+    }
+  },
+  "dc6":{
+    "rack6":{
+      "server666":{
+        "volumes":[],
+        "limit":500
+      }
+    }
+  }
+}
+`
+
+func TestFindEmptySlotsForOneVolumeScheduleByWeight(t *testing.T) {
+	topo := setup(topologyLayout3)
+	vg := NewDefaultVolumeGrowth()
+	rp, _ := super_block.NewReplicaPlacementFromString("100")
+	volumeGrowOption := &VolumeGrowOption{
+		Collection:       "Weight",
+		ReplicaPlacement: rp,
+		DataCenter:       "",
+		Rack:             "",
+		DataNode:         "",
+	}
+
+	distribution := map[NodeId]int{}
+	// assign 1000 volumes
+	for i := 0; i < 1000; i++ {
+		servers, err := vg.findEmptySlotsForOneVolume(topo, volumeGrowOption)
+		if err != nil {
+			fmt.Println("finding empty slots error :", err)
+			t.Fail()
+		}
+		for _, server := range servers {
+			// fmt.Println("assigned node :", server.Id())
+			if _, ok := distribution[server.id]; !ok {
+				distribution[server.id] = 0
+			}
+			distribution[server.id] += 1
+		}
+	}
+
+	for k, v := range distribution {
+		fmt.Printf("%s : %d\n", k, v)
 	}
 }

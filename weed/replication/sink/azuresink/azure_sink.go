@@ -96,7 +96,7 @@ func (g *AzureSink) CreateEntry(key string, entry *filer_pb.Entry) error {
 	}
 
 	totalSize := filer2.TotalSize(entry.Chunks)
-	chunkViews := filer2.ViewFromChunks(entry.Chunks, 0, int(totalSize))
+	chunkViews := filer2.ViewFromChunks(entry.Chunks, 0, int64(totalSize))
 
 	// Create a URL that references a to-be-created blob in your
 	// Azure Storage account's container.
@@ -115,7 +115,7 @@ func (g *AzureSink) CreateEntry(key string, entry *filer_pb.Entry) error {
 		}
 
 		var writeErr error
-		_, readErr := util.ReadUrlAsStream(fileUrl, chunk.Offset, int(chunk.Size), func(data []byte) {
+		readErr := util.ReadUrlAsStream(fileUrl, nil, false, chunk.IsFullChunk, chunk.Offset, int(chunk.Size), func(data []byte) {
 			_, writeErr = appendBlobURL.AppendBlock(context.Background(), bytes.NewReader(data), azblob.AppendBlobAccessConditions{}, nil)
 		})
 

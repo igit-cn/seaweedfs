@@ -50,6 +50,7 @@ Your support will be really appreciated by me and other supporters!
 
 - [Download Binaries for different platforms](https://github.com/chrislusf/seaweedfs/releases/latest)
 - [SeaweedFS on Slack](https://join.slack.com/t/seaweedfs/shared_invite/enQtMzI4MTMwMjU2MzA3LTEyYzZmZWYzOGQ3MDJlZWMzYmI0OTE4OTJiZjJjODBmMzUxNmYwODg0YjY3MTNlMjBmZDQ1NzQ5NDJhZWI2ZmY)
+- [SeaweedFS on Twitter](https://twitter.com/SeaweedFS)
 - [SeaweedFS Mailing List](https://groups.google.com/d/forum/seaweedfs)
 - [Wiki Documentation](https://github.com/chrislusf/seaweedfs/wiki)
 - [SeaweedFS Introduction Slides](https://www.slideshare.net/chrislusf/seaweedfs-introduction)
@@ -98,6 +99,7 @@ On top of the object store, optional [Filer] can support directories and POSIX a
 * Automatic master servers failover - no single point of failure (SPOF).
 * Automatic Gzip compression depending on file mime type.
 * Automatic compaction to reclaim disk space after deletion or update.
+* [Automatic entry TTL expiration][VolumeServerTTL].
 * Servers in the same cluster can have different disk spaces, file systems, OS etc.
 * Adding/Removing servers does **not** cause any data re-balancing.
 * Optionally fix the orientation for jpeg pictures.
@@ -116,6 +118,8 @@ On top of the object store, optional [Filer] can support directories and POSIX a
 * [Hadoop Compatible File System][Hadoop] to access files from Hadoop/Spark/Flink/etc jobs.
 * [Async Backup To Cloud][BackupToCloud] has extremely fast local access and backups to Amazon S3, Google Cloud Storage, Azure, BackBlaze.
 * [WebDAV] access as a mapped drive on Mac and Windows, or from mobile devices.
+* [AES256-GCM Encrypted Storage][FilerDataEncryption] safely stores the encrypted data.
+* [File TTL][FilerTTL] automatically purge file metadata and actual file data.
 
 [Filer]: https://github.com/chrislusf/seaweedfs/wiki/Directories-and-Files
 [Mount]: https://github.com/chrislusf/seaweedfs/wiki/Mount
@@ -125,6 +129,9 @@ On top of the object store, optional [Filer] can support directories and POSIX a
 [WebDAV]: https://github.com/chrislusf/seaweedfs/wiki/WebDAV
 [ErasureCoding]: https://github.com/chrislusf/seaweedfs/wiki/Erasure-coding-for-warm-storage
 [CloudTier]: https://github.com/chrislusf/seaweedfs/wiki/Cloud-Tier
+[FilerDataEncryption]: https://github.com/chrislusf/seaweedfs/wiki/Filer-Data-Encryption
+[FilerTTL]: https://github.com/chrislusf/seaweedfs/wiki/Filer-Stores
+[VolumeServerTTL]: https://github.com/chrislusf/seaweedfs/wiki/Store-file-with-a-Time-To-Live
 
 [Back to TOC](#table-of-contents)
 
@@ -363,6 +370,7 @@ The architectures are mostly the same. SeaweedFS aims to store and read files fa
 | SeaweedFS Filer| Linearly Scalable, Customizable | O(1) disk seek   | FUSE   | Yes      | Yes                       |
 | GlusterFS      | hashing          |                  | FUSE, NFS          |          |                           |
 | Ceph           | hashing + rules  |                  | FUSE               | Yes      |                           |
+| MooseFS        | in memory        |                  | FUSE               |       | No                          |
 
 [Back to TOC](#table-of-contents)
 
@@ -371,6 +379,14 @@ The architectures are mostly the same. SeaweedFS aims to store and read files fa
 GlusterFS stores files, both directories and content, in configurable volumes called "bricks".
 
 GlusterFS hashes the path and filename into ids, and assigned to virtual volumes, and then mapped to "bricks".
+
+[Back to TOC](#table-of-contents)
+
+### Compared to MooseFS ###
+
+MooseFS chooses to neglect small file issue. From moosefs 3.0 manual, "even a small file will occupy 64KiB plus additionally 4KiB of checksums and 1KiB for the header", because it "was initially designed for keeping large amounts (like several thousands) of very big files"
+
+MooseFS Master Server keeps all meta data in memory. Same issue as HDFS namenode. 
 
 [Back to TOC](#table-of-contents)
 
@@ -386,7 +402,7 @@ Ceph uses CRUSH hashing to automatically manage the data placement. SeaweedFS pl
 
 SeaweedFS is optimized for small files. Small files are stored as one continuous block of content, with at most 8 unused bytes between files. Small file access is O(1) disk read.
 
-SeaweedFS Filer uses off-the-shelf stores, such as MySql, Postgres, Redis, Etcd, Cassandra, MemSql, TiDB, CockroachCB, to manage file directories. There are proven, scalable, and easier to manage.
+SeaweedFS Filer uses off-the-shelf stores, such as MySql, Postgres, Redis, Etcd, Cassandra, MemSql, TiDB, CockroachCB, to manage file directories. These stores are proven, scalable, and easier to manage.
 
 | SeaweedFS         | comparable to Ceph | advantage |
 | -------------  | ------------- | ---------------- |

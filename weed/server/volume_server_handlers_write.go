@@ -49,7 +49,7 @@ func (vs *VolumeServer) PostHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ret := operation.UploadResult{}
-	_, isUnchanged, writeError := topology.ReplicatedWrite(vs.GetMaster(), vs.store, volumeId, needle, r)
+	isUnchanged, writeError := topology.ReplicatedWrite(vs.GetMaster(), vs.store, volumeId, needle, r)
 
 	// http 204 status code does not allow body
 	if writeError == nil && isUnchanged {
@@ -68,6 +68,7 @@ func (vs *VolumeServer) PostHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	ret.Size = uint32(originalSize)
 	ret.ETag = needle.Etag()
+	ret.Mime = string(needle.Mime)
 	setEtag(w, ret.ETag)
 	writeJsonQuiet(w, r, httpStatus, ret)
 }
@@ -125,7 +126,7 @@ func (vs *VolumeServer) DeleteHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// make sure all chunks had deleted before delete manifest
-		if e := chunkManifest.DeleteChunks(vs.GetMaster(), vs.grpcDialOption); e != nil {
+		if e := chunkManifest.DeleteChunks(vs.GetMaster(), false, vs.grpcDialOption); e != nil {
 			writeJsonError(w, r, http.StatusInternalServerError, fmt.Errorf("Delete chunks error: %v", e))
 			return
 		}
@@ -164,4 +165,12 @@ func setEtag(w http.ResponseWriter, etag string) {
 			w.Header().Set("ETag", "\""+etag+"\"")
 		}
 	}
+}
+
+func getEtag(resp *http.Response) (etag string){
+	etag = resp.Header.Get("ETag")
+	if strings.HasPrefix(etag, "\"") && strings.HasSuffix(etag, "\""){
+		return etag[1:len(etag)-1]
+	}
+	return
 }

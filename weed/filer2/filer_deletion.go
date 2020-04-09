@@ -6,14 +6,14 @@ import (
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/operation"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
+	"github.com/chrislusf/seaweedfs/weed/wdclient"
 )
 
-func (f *Filer) loopProcessingDeletion() {
-
-	lookupFunc := func(vids []string) (map[string]operation.LookupResult, error) {
+func LookupByMasterClientFn(masterClient *wdclient.MasterClient) func(vids []string) (map[string]operation.LookupResult, error) {
+	return func(vids []string) (map[string]operation.LookupResult, error) {
 		m := make(map[string]operation.LookupResult)
 		for _, vid := range vids {
-			locs, _ := f.MasterClient.GetVidLocations(vid)
+			locs, _ := masterClient.GetVidLocations(vid)
 			var locations []operation.Location
 			for _, loc := range locs {
 				locations = append(locations, operation.Location{
@@ -28,17 +28,25 @@ func (f *Filer) loopProcessingDeletion() {
 		}
 		return m, nil
 	}
+}
+
+func (f *Filer) loopProcessingDeletion() {
+
+	lookupFunc := LookupByMasterClientFn(f.MasterClient)
 
 	var deletionCount int
 	for {
 		deletionCount = 0
 		f.fileIdDeletionQueue.Consume(func(fileIds []string) {
 			deletionCount = len(fileIds)
-			_, err := operation.DeleteFilesWithLookupVolumeId(f.GrpcDialOption, fileIds, lookupFunc)
+			deleteResults, err := operation.DeleteFilesWithLookupVolumeId(f.GrpcDialOption, fileIds, lookupFunc)
 			if err != nil {
 				glog.V(0).Infof("deleting fileIds len=%d error: %v", deletionCount, err)
 			} else {
 				glog.V(1).Infof("deleting fileIds len=%d", deletionCount)
+			}
+			if len(deleteResults) != deletionCount {
+				glog.V(0).Infof("delete %d fileIds actual %d", deletionCount, len(deleteResults))
 			}
 		})
 

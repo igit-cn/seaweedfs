@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	"github.com/chrislusf/seaweedfs/weed/glog"
+	"github.com/chrislusf/seaweedfs/weed/pb"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
 	"github.com/chrislusf/seaweedfs/weed/security"
 	"github.com/chrislusf/seaweedfs/weed/server"
@@ -26,13 +27,13 @@ type FilerOptions struct {
 	publicPort              *int
 	collection              *string
 	defaultReplicaPlacement *string
-	redirectOnRead          *bool
 	disableDirListing       *bool
 	maxMB                   *int
 	dirListingLimit         *int
 	dataCenter              *string
 	enableNotification      *bool
 	disableHttp             *bool
+	cipher                  *bool
 
 	// default leveldb directory, used in "weed server" mode
 	defaultLevelDbDirectory *string
@@ -46,12 +47,12 @@ func init() {
 	f.port = cmdFiler.Flag.Int("port", 8888, "filer server http listen port")
 	f.publicPort = cmdFiler.Flag.Int("port.readonly", 0, "readonly port opened to public")
 	f.defaultReplicaPlacement = cmdFiler.Flag.String("defaultReplicaPlacement", "000", "default replication type if not specified")
-	f.redirectOnRead = cmdFiler.Flag.Bool("redirectOnRead", false, "whether proxy or redirect to volume server during file GET request")
 	f.disableDirListing = cmdFiler.Flag.Bool("disableDirListing", false, "turn off directory listing")
 	f.maxMB = cmdFiler.Flag.Int("maxMB", 32, "split files larger than the limit")
 	f.dirListingLimit = cmdFiler.Flag.Int("dirListLimit", 100000, "limit sub dir listing size")
 	f.dataCenter = cmdFiler.Flag.String("dataCenter", "", "prefer to write to volumes in this data center")
 	f.disableHttp = cmdFiler.Flag.Bool("disableHttp", false, "disable http request, only gRpc operations are allowed")
+	f.cipher = cmdFiler.Flag.Bool("encryptVolumeData", false, "encrypt data on volume servers")
 }
 
 var cmdFiler = &Command{
@@ -102,7 +103,6 @@ func (fo *FilerOptions) startFiler() {
 		Masters:            strings.Split(*fo.masters, ","),
 		Collection:         *fo.collection,
 		DefaultReplication: *fo.defaultReplicaPlacement,
-		RedirectOnRead:     *fo.redirectOnRead,
 		DisableDirListing:  *fo.disableDirListing,
 		MaxMB:              *fo.maxMB,
 		DirListingLimit:    *fo.dirListingLimit,
@@ -110,6 +110,7 @@ func (fo *FilerOptions) startFiler() {
 		DefaultLevelDbDir:  defaultLevelDbDirectory,
 		DisableHttp:        *fo.disableHttp,
 		Port:               uint32(*fo.port),
+		Cipher:             *fo.cipher,
 	})
 	if nfs_err != nil {
 		glog.Fatalf("Filer startup error: %v", nfs_err)
@@ -144,7 +145,7 @@ func (fo *FilerOptions) startFiler() {
 	if err != nil {
 		glog.Fatalf("failed to listen on grpc port %d: %v", grpcPort, err)
 	}
-	grpcS := util.NewGrpcServer(security.LoadServerTLS(util.GetViper(), "grpc.filer"))
+	grpcS := pb.NewGrpcServer(security.LoadServerTLS(util.GetViper(), "grpc.filer"))
 	filer_pb.RegisterSeaweedFilerServer(grpcS, fs)
 	reflection.Register(grpcS)
 	go grpcS.Serve(grpcL)

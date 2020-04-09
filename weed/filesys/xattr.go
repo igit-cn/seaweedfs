@@ -1,12 +1,9 @@
 package filesys
 
 import (
-	"context"
-	"strings"
-
-	"github.com/chrislusf/seaweedfs/weed/filer2"
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
+	"github.com/chrislusf/seaweedfs/weed/util"
 	"github.com/seaweedfs/fuse"
 )
 
@@ -110,7 +107,7 @@ func listxattr(entry *filer_pb.Entry, req *fuse.ListxattrRequest, resp *fuse.Lis
 
 func (wfs *WFS) maybeLoadEntry(dir, name string) (entry *filer_pb.Entry, err error) {
 
-	fullpath := filer2.NewFullPath(dir, name)
+	fullpath := util.NewFullPath(dir, name)
 	entry = wfs.cacheGet(fullpath)
 	if entry != nil {
 		return
@@ -124,9 +121,9 @@ func (wfs *WFS) maybeLoadEntry(dir, name string) (entry *filer_pb.Entry, err err
 			Directory: dir,
 		}
 
-		resp, err := client.LookupDirectoryEntry(context.Background(), request)
-		if err != nil || resp == nil || resp.Entry == nil {
-			if err == filer2.ErrNotFound || strings.Contains(err.Error(), filer2.ErrNotFound.Error()) {
+		resp, err := filer_pb.LookupEntry(client, request)
+		if err != nil {
+			if err == filer_pb.ErrNotFound {
 				glog.V(3).Infof("file attr read not found file %v: %v", request, err)
 				return fuse.ENOENT
 			}

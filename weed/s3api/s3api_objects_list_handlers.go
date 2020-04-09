@@ -91,7 +91,7 @@ func (s3a *S3ApiServer) listFilerEntries(bucket, originalPrefix string, maxKeys 
 	}
 
 	// check filer
-	err = s3a.withFilerClient(func(client filer_pb.SeaweedFilerClient) error {
+	err = s3a.WithFilerClient(func(client filer_pb.SeaweedFilerClient) error {
 
 		request := &filer_pb.ListEntriesRequest{
 			Directory:          fmt.Sprintf("%s/%s/%s", s3a.option.BucketsPath, bucket, dir),
@@ -139,7 +139,7 @@ func (s3a *S3ApiServer) listFilerEntries(bucket, originalPrefix string, maxKeys 
 				contents = append(contents, ListEntry{
 					Key:          fmt.Sprintf("%s%s", dir, entry.Name),
 					LastModified: time.Unix(entry.Attributes.Mtime, 0),
-					ETag:         "\"" + filer2.ETag(entry.Chunks) + "\"",
+					ETag:         "\"" + filer2.ETag(entry) + "\"",
 					Size:         int64(filer2.TotalSize(entry.Chunks)),
 					Owner: CanonicalUser{
 						ID:          fmt.Sprintf("%x", entry.Attributes.Uid),

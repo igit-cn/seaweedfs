@@ -53,11 +53,17 @@ func (v *Volume) Compact(preallocate int64, compactionBytePerSecond int64) error
 	v.lastCompactIndexOffset = v.IndexFileSize()
 	v.lastCompactRevision = v.SuperBlock.CompactionRevision
 	glog.V(3).Infof("creating copies for volume %d ,last offset %d...", v.Id, v.lastCompactIndexOffset)
+	if err := v.DataBackend.Sync(); err != nil {
+		glog.V(0).Infof("compact fail to sync volume %d", v.Id)
+	}
+	if err := v.nm.Sync(); err != nil {
+		glog.V(0).Infof("compact fail to sync volume idx %d", v.Id)
+	}
 	return v.copyDataAndGenerateIndexFile(filePath+".cpd", filePath+".cpx", preallocate, compactionBytePerSecond)
 }
 
 // compact a volume based on deletions in .idx files
-func (v *Volume) Compact2(preallocate int64) error {
+func (v *Volume) Compact2(preallocate int64, compactionBytePerSecond int64) error {
 
 	if v.MemoryMapMaxSizeMb != 0 { //it makes no sense to compact in memory
 		return nil
@@ -73,7 +79,13 @@ func (v *Volume) Compact2(preallocate int64) error {
 	v.lastCompactIndexOffset = v.IndexFileSize()
 	v.lastCompactRevision = v.SuperBlock.CompactionRevision
 	glog.V(3).Infof("creating copies for volume %d ...", v.Id)
-	return copyDataBasedOnIndexFile(filePath+".dat", filePath+".idx", filePath+".cpd", filePath+".cpx", v.SuperBlock, v.Version(), preallocate)
+	if err := v.DataBackend.Sync(); err != nil {
+		glog.V(0).Infof("compact2 fail to sync volume dat %d", v.Id)
+	}
+	if err := v.nm.Sync(); err != nil {
+		glog.V(0).Infof("compact2 fail to sync volume idx %d", v.Id)
+	}
+	return copyDataBasedOnIndexFile(filePath+".dat", filePath+".idx", filePath+".cpd", filePath+".cpx", v.SuperBlock, v.Version(), preallocate, compactionBytePerSecond)
 }
 
 func (v *Volume) CommitCompact() error {
@@ -113,8 +125,14 @@ func (v *Volume) CommitCompact() error {
 		}
 	} else {
 		if runtime.GOOS == "windows" {
-			os.RemoveAll(v.FileName() + ".dat")
-			os.RemoveAll(v.FileName() + ".idx")
+			e = os.RemoveAll(v.FileName() + ".dat")
+			if e != nil {
+				return e
+			}
+			e = os.RemoveAll(v.FileName() + ".idx")
+			if e != nil {
+				return e
+			}
 		}
 		var e error
 		if e = os.Rename(v.FileName()+".cpd", v.FileName()+".dat"); e != nil {
@@ -342,6 +360,7 @@ func (v *Volume) copyDataAndGenerateIndexFile(dstName, idxName string, prealloca
 	defer dst.Close()
 
 	nm := needle_map.NewMemDb()
+	defer nm.Close()
 
 	scanner := &VolumeFileScanner4Vacuum{
 		v:              v,
@@ -359,7 +378,7 @@ func (v *Volume) copyDataAndGenerateIndexFile(dstName, idxName string, prealloca
 	return
 }
 
-func copyDataBasedOnIndexFile(srcDatName, srcIdxName, dstDatName, datIdxName string, sb super_block.SuperBlock, version needle.Version, preallocate int64) (err error) {
+func copyDataBasedOnIndexFile(srcDatName, srcIdxName, dstDatName, datIdxName string, sb super_block.SuperBlock, version needle.Version, preallocate int64, compactionBytePerSecond int64) (err error) {
 	var (
 		srcDatBackend, dstDatBackend backend.BackendStorageFile
 		dataFile                     *os.File
@@ -370,7 +389,9 @@ func copyDataBasedOnIndexFile(srcDatName, srcIdxName, dstDatName, datIdxName str
 	defer dstDatBackend.Close()
 
 	oldNm := needle_map.NewMemDb()
+	defer oldNm.Close()
 	newNm := needle_map.NewMemDb()
+	defer newNm.Close()
 	if err = oldNm.LoadFromIdx(srcIdxName); err != nil {
 		return
 	}
@@ -378,12 +399,15 @@ func copyDataBasedOnIndexFile(srcDatName, srcIdxName, dstDatName, datIdxName str
 		return err
 	}
 	srcDatBackend = backend.NewDiskFile(dataFile)
+	defer srcDatBackend.Close()
 
 	now := uint64(time.Now().Unix())
 
 	sb.CompactionRevision++
 	dstDatBackend.WriteAt(sb.Bytes(), 0)
 	newOffset := int64(sb.BlockSize())
+
+	writeThrottler := util.NewWriteThrottler(compactionBytePerSecond)
 
 	oldNm.AscendingVisit(func(value needle_map.NeedleValue) error {
 
@@ -409,8 +433,10 @@ func copyDataBasedOnIndexFile(srcDatName, srcIdxName, dstDatName, datIdxName str
 		if _, _, _, err = n.Append(dstDatBackend, sb.Version); err != nil {
 			return fmt.Errorf("cannot append needle: %s", err)
 		}
-		newOffset += n.DiskSize(version)
-		glog.V(3).Infoln("saving key", n.Id, "volume offset", offset, "=>", newOffset, "data_size", n.Size)
+		delta := n.DiskSize(version)
+		newOffset += delta
+		writeThrottler.MaybeSlowdown(delta)
+		glog.V(4).Infoln("saving key", n.Id, "volume offset", offset, "=>", newOffset, "data_size", n.Size)
 
 		return nil
 	})

@@ -78,11 +78,11 @@ func (pages *ContinuousDirtyPages) flushAndSave(offset int64, data []byte) (chun
 	// flush the new page
 	if chunk, err = pages.saveToStorage(bytes.NewReader(data), offset, int64(len(data))); err == nil {
 		if chunk != nil {
-			glog.V(4).Infof("%s/%s flush big request [%d,%d) to %s", pages.f.dir.Path, pages.f.Name, chunk.Offset, chunk.Offset+int64(chunk.Size), chunk.FileId)
+			glog.V(4).Infof("%s/%s flush big request [%d,%d) to %s", pages.f.dir.FullPath(), pages.f.Name, chunk.Offset, chunk.Offset+int64(chunk.Size), chunk.FileId)
 			chunks = append(chunks, chunk)
 		}
 	} else {
-		glog.V(0).Infof("%s/%s failed to flush2 [%d,%d): %v", pages.f.dir.Path, pages.f.Name, chunk.Offset, chunk.Offset+int64(chunk.Size), err)
+		glog.V(0).Infof("%s/%s failed to flush2 [%d,%d): %v", pages.f.dir.FullPath(), pages.f.Name, chunk.Offset, chunk.Offset+int64(chunk.Size), err)
 		return
 	}
 
@@ -174,7 +174,7 @@ func (pages *ContinuousDirtyPages) saveToStorage(reader io.Reader, offset int64,
 	}
 
 	fileUrl := fmt.Sprintf("http://%s/%s", host, fileId)
-	uploadResult, err := operation.Upload(fileUrl, pages.f.Name, reader, false, "", nil, auth)
+	uploadResult, err, data := operation.Upload(fileUrl, pages.f.Name, pages.f.wfs.option.Cipher, reader, false, "", nil, auth)
 	if err != nil {
 		glog.V(0).Infof("upload data %v to %s: %v", pages.f.Name, fileUrl, err)
 		return nil, fmt.Errorf("upload data: %v", err)
@@ -183,13 +183,16 @@ func (pages *ContinuousDirtyPages) saveToStorage(reader io.Reader, offset int64,
 		glog.V(0).Infof("upload failure %v to %s: %v", pages.f.Name, fileUrl, err)
 		return nil, fmt.Errorf("upload result: %v", uploadResult.Error)
 	}
+	pages.f.wfs.chunkCache.SetChunk(fileId, data)
 
 	return &filer_pb.FileChunk{
-		FileId: fileId,
-		Offset: offset,
-		Size:   uint64(size),
-		Mtime:  time.Now().UnixNano(),
-		ETag:   uploadResult.ETag,
+		FileId:    fileId,
+		Offset:    offset,
+		Size:      uint64(size),
+		Mtime:     time.Now().UnixNano(),
+		ETag:      uploadResult.ETag,
+		CipherKey: uploadResult.CipherKey,
+		IsGzipped: uploadResult.Gzip > 0,
 	}, nil
 
 }

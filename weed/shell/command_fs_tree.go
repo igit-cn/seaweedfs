@@ -5,8 +5,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/chrislusf/seaweedfs/weed/filer2"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
+	"github.com/chrislusf/seaweedfs/weed/util"
 )
 
 func init() {
@@ -23,20 +23,21 @@ func (c *commandFsTree) Name() string {
 func (c *commandFsTree) Help() string {
 	return `recursively list all files under a directory
 
-	fs.tree http://<filer_server>:<port>/dir/
+	fs.tree /some/dir
+
 `
 }
 
 func (c *commandFsTree) Do(args []string, commandEnv *CommandEnv, writer io.Writer) (err error) {
 
-	filerServer, filerPort, path, err := commandEnv.parseUrl(findInputDirectory(args))
+	path, err := commandEnv.parseUrl(findInputDirectory(args))
 	if err != nil {
 		return err
 	}
 
-	dir, name := filer2.FullPath(path).DirAndName()
+	dir, name := util.FullPath(path).DirAndName()
 
-	dirCount, fCount, terr := treeTraverseDirectory(writer, commandEnv.getFilerClient(filerServer, filerPort), filer2.FullPath(dir), name, newPrefix(), -1)
+	dirCount, fCount, terr := treeTraverseDirectory(writer, commandEnv, util.FullPath(dir), name, newPrefix(), -1)
 
 	if terr == nil {
 		fmt.Fprintf(writer, "%d directories, %d files\n", dirCount, fCount)
@@ -46,11 +47,11 @@ func (c *commandFsTree) Do(args []string, commandEnv *CommandEnv, writer io.Writ
 
 }
 
-func treeTraverseDirectory(writer io.Writer, filerClient filer2.FilerClient, dir filer2.FullPath, name string, prefix *Prefix, level int) (directoryCount, fileCount int64, err error) {
+func treeTraverseDirectory(writer io.Writer, filerClient filer_pb.FilerClient, dir util.FullPath, name string, prefix *Prefix, level int) (directoryCount, fileCount int64, err error) {
 
 	prefix.addMarker(level)
 
-	err = filer2.ReadDirAllEntries(filerClient, dir, name, func(entry *filer_pb.Entry, isLast bool) {
+	err = filer_pb.ReadDirAllEntries(filerClient, dir, name, func(entry *filer_pb.Entry, isLast bool) {
 		if level < 0 && name != "" {
 			if entry.Name != name {
 				return

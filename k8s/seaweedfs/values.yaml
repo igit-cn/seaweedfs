@@ -4,7 +4,7 @@ global:
   registry: ""
   repository: ""
   imageName: chrislusf/seaweedfs
-  imageTag: "1.58"
+  imageTag: "1.71"
   imagePullPolicy: IfNotPresent
   imagePullSecrets: imagepullsecret
   restartPolicy: Always
@@ -107,8 +107,9 @@ volume:
   # Directories to store data files. dir[,dir]... (default "/tmp")
   dir: "/data"
 
-  # Maximum numbers of volumes, count[,count]... (default "7")
-  maxVolumes: "10000"
+  # Maximum numbers of volumes, count[,count]...
+  # If set to zero on non-windows OS, the limit will be auto configured. (default "7")
+  maxVolumes: "0"
 
   # Volume server's rack name
   rack: null
@@ -176,9 +177,6 @@ filer:
   port: 8888
   grpcPort: 18888
   loggingOverrideLevel: null
-
-  # Whether proxy or redirect to volume server during file GET request
-  redirectOnRead: false
 
   # Limit sub dir listing size (default 100000)
   dirListLimit: 100000

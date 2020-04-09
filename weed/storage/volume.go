@@ -180,9 +180,9 @@ func (v *Volume) expired(volumeSizeLimit uint64) bool {
 	if v.Ttl == nil || v.Ttl.Minutes() == 0 {
 		return false
 	}
-	glog.V(1).Infof("now:%v lastModified:%v", time.Now().Unix(), v.lastModifiedTsSeconds)
+	glog.V(2).Infof("now:%v lastModified:%v", time.Now().Unix(), v.lastModifiedTsSeconds)
 	livedMinutes := (time.Now().Unix() - int64(v.lastModifiedTsSeconds)) / 60
-	glog.V(1).Infof("ttl:%v lived:%v", v.Ttl, livedMinutes)
+	glog.V(2).Infof("ttl:%v lived:%v", v.Ttl, livedMinutes)
 	if int64(v.Ttl.Minutes()) < livedMinutes {
 		return true
 	}
@@ -215,7 +215,7 @@ func (v *Volume) ToVolumeInformationMessage() *master_pb.VolumeInformationMessag
 		FileCount:        v.FileCount(),
 		DeleteCount:      v.DeletedCount(),
 		DeletedByteCount: v.DeletedSize(),
-		ReadOnly:         v.noWriteOrDelete || v.noWriteCanDelete,
+		ReadOnly:         v.IsReadOnly(),
 		ReplicaPlacement: uint32(v.ReplicaPlacement.Byte()),
 		Version:          uint32(v.Version()),
 		Ttl:              v.Ttl.ToUint32(),
@@ -236,4 +236,8 @@ func (v *Volume) RemoteStorageNameKey() (storageName, storageKey string) {
 		return
 	}
 	return v.volumeInfo.GetFiles()[0].BackendName(), v.volumeInfo.GetFiles()[0].GetKey()
+}
+
+func (v *Volume) IsReadOnly() bool {
+	return v.noWriteOrDelete || v.noWriteCanDelete
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,6 +12,8 @@ import (
 	"github.com/karlseguin/ccache"
 
 	"github.com/chrislusf/seaweedfs/weed/glog"
+	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
+	"github.com/chrislusf/seaweedfs/weed/queue"
 	"github.com/chrislusf/seaweedfs/weed/util"
 	"github.com/chrislusf/seaweedfs/weed/wdclient"
 )
@@ -33,15 +34,18 @@ type Filer struct {
 	DirBucketsPath      string
 	DirQueuesPath       string
 	buckets             *FilerBuckets
+	Cipher              bool
+	metaLogBuffer       *queue.LogBuffer
 }
 
-func NewFiler(masters []string, grpcDialOption grpc.DialOption, filerGrpcPort uint32) *Filer {
+func NewFiler(masters []string, grpcDialOption grpc.DialOption, filerGrpcPort uint32, notifyFn func()) *Filer {
 	f := &Filer{
 		directoryCache:      ccache.New(ccache.Configure().MaxSize(1000).ItemsToPrune(100)),
 		MasterClient:        wdclient.NewMasterClient(grpcDialOption, "filer", filerGrpcPort, masters),
 		fileIdDeletionQueue: util.NewUnboundedQueue(),
 		GrpcDialOption:      grpcDialOption,
 	}
+	f.metaLogBuffer = queue.NewLogBuffer(time.Minute, f.logFlushFunc, notifyFn)
 
 	go f.loopProcessingDeletion()
 
@@ -89,7 +93,7 @@ func (f *Filer) CreateEntry(ctx context.Context, entry *Entry, o_excl bool) erro
 	var lastDirectoryEntry *Entry
 
 	for i := 1; i < len(dirParts); i++ {
-		dirPath := "/" + filepath.ToSlash(filepath.Join(dirParts[:i]...))
+		dirPath := "/" + util.Join(dirParts[:i]...)
 		// fmt.Printf("%d directory: %+v\n", i, dirPath)
 
 		// first check local cache
@@ -98,7 +102,7 @@ func (f *Filer) CreateEntry(ctx context.Context, entry *Entry, o_excl bool) erro
 		// not found, check the store directly
 		if dirEntry == nil {
 			glog.V(4).Infof("find uncached directory: %s", dirPath)
-			dirEntry, _ = f.FindEntry(ctx, FullPath(dirPath))
+			dirEntry, _ = f.FindEntry(ctx, util.FullPath(dirPath))
 		} else {
 			// glog.V(4).Infof("found cached directory: %s", dirPath)
 		}
@@ -110,7 +114,7 @@ func (f *Filer) CreateEntry(ctx context.Context, entry *Entry, o_excl bool) erro
 			now := time.Now()
 
 			dirEntry = &Entry{
-				FullPath: FullPath(dirPath),
+				FullPath: util.FullPath(dirPath),
 				Attr: Attr{
 					Mtime:       now,
 					Crtime:      now,
@@ -125,7 +129,7 @@ func (f *Filer) CreateEntry(ctx context.Context, entry *Entry, o_excl bool) erro
 			glog.V(2).Infof("create directory: %s %v", dirPath, dirEntry.Mode)
 			mkdirErr := f.store.InsertEntry(ctx, dirEntry)
 			if mkdirErr != nil {
-				if _, err := f.FindEntry(ctx, FullPath(dirPath)); err == ErrNotFound {
+				if _, err := f.FindEntry(ctx, util.FullPath(dirPath)); err == filer_pb.ErrNotFound {
 					glog.V(3).Infof("mkdir %s: %v", dirPath, mkdirErr)
 					return fmt.Errorf("mkdir %s: %v", dirPath, mkdirErr)
 				}
@@ -205,7 +209,7 @@ func (f *Filer) UpdateEntry(ctx context.Context, oldEntry, entry *Entry) (err er
 	return f.store.UpdateEntry(ctx, entry)
 }
 
-func (f *Filer) FindEntry(ctx context.Context, p FullPath) (entry *Entry, err error) {
+func (f *Filer) FindEntry(ctx context.Context, p util.FullPath) (entry *Entry, err error) {
 
 	now := time.Now()
 
@@ -221,14 +225,51 @@ func (f *Filer) FindEntry(ctx context.Context, p FullPath) (entry *Entry, err er
 			},
 		}, nil
 	}
-	return f.store.FindEntry(ctx, p)
+	entry, err = f.store.FindEntry(ctx, p)
+	if entry != nil && entry.TtlSec > 0 {
+		if entry.Crtime.Add(time.Duration(entry.TtlSec) * time.Second).Before(time.Now()) {
+			f.store.DeleteEntry(ctx, p.Child(entry.Name()))
+			return nil, filer_pb.ErrNotFound
+		}
+	}
+	return
+
 }
 
-func (f *Filer) ListDirectoryEntries(ctx context.Context, p FullPath, startFileName string, inclusive bool, limit int) ([]*Entry, error) {
+func (f *Filer) ListDirectoryEntries(ctx context.Context, p util.FullPath, startFileName string, inclusive bool, limit int) ([]*Entry, error) {
 	if strings.HasSuffix(string(p), "/") && len(p) > 1 {
 		p = p[0 : len(p)-1]
 	}
-	return f.store.ListDirectoryEntries(ctx, p, startFileName, inclusive, limit)
+
+	var makeupEntries []*Entry
+	entries, expiredCount, lastFileName, err := f.doListDirectoryEntries(ctx, p, startFileName, inclusive, limit)
+	for expiredCount > 0 && err == nil {
+		makeupEntries, expiredCount, lastFileName, err = f.doListDirectoryEntries(ctx, p, lastFileName, false, expiredCount)
+		if err == nil {
+			entries = append(entries, makeupEntries...)
+		}
+	}
+
+	return entries, err
+}
+
+func (f *Filer) doListDirectoryEntries(ctx context.Context, p util.FullPath, startFileName string, inclusive bool, limit int) (entries []*Entry, expiredCount int, lastFileName string, err error) {
+	listedEntries, listErr := f.store.ListDirectoryEntries(ctx, p, startFileName, inclusive, limit)
+	if listErr != nil {
+		return listedEntries, expiredCount, "", listErr
+	}
+	for _, entry := range listedEntries {
+		lastFileName = entry.Name()
+		if entry.TtlSec > 0 {
+			if entry.Crtime.Add(time.Duration(entry.TtlSec) * time.Second).Before(time.Now()) {
+				f.store.DeleteEntry(ctx, p.Child(entry.Name()))
+				expiredCount++
+				continue
+			}
+		}
+		entries = append(entries, entry)
+	}
+	return
 }
 
 func (f *Filer) cacheDelDirectory(dirpath string) {
@@ -268,4 +309,9 @@ func (f *Filer) cacheSetDirectory(dirpath string, dirEntry *Entry, level int) {
 	}
 
 	f.directoryCache.Set(dirpath, dirEntry, time.Duration(minutes)*time.Minute)
+}
+
+func (f *Filer) Shutdown() {
+	f.metaLogBuffer.Shutdown()
+	f.store.Shutdown()
 }

@@ -7,9 +7,10 @@ import (
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
 	"github.com/chrislusf/seaweedfs/weed/pb/master_pb"
+	"github.com/chrislusf/seaweedfs/weed/util"
 )
 
-func (f *Filer) DeleteEntryMetaAndData(ctx context.Context, p FullPath, isRecursive bool, ignoreRecursiveError, shouldDeleteChunks bool) (err error) {
+func (f *Filer) DeleteEntryMetaAndData(ctx context.Context, p util.FullPath, isRecursive bool, ignoreRecursiveError, shouldDeleteChunks bool) (err error) {
 	if p == "/" {
 		return nil
 	}
@@ -72,6 +73,8 @@ func (f *Filer) doBatchDeleteFolderMetaAndData(ctx context.Context, entry *Entry
 			var dirChunks []*filer_pb.FileChunk
 			if sub.IsDirectory() {
 				dirChunks, err = f.doBatchDeleteFolderMetaAndData(ctx, sub, isRecursive, ignoreRecursiveError, shouldDeleteChunks)
+				f.cacheDelDirectory(string(sub.FullPath))
+				f.NotifyUpdateEvent(sub, nil, shouldDeleteChunks)
 				chunks = append(chunks, dirChunks...)
 			} else {
 				chunks = append(chunks, sub.Chunks...)
@@ -86,14 +89,11 @@ func (f *Filer) doBatchDeleteFolderMetaAndData(ctx context.Context, entry *Entry
 		}
 	}
 
-	f.cacheDelDirectory(string(entry.FullPath))
-
 	glog.V(3).Infof("deleting directory %v delete %d chunks: %v", entry.FullPath, len(chunks), shouldDeleteChunks)
 
 	if storeDeletionErr := f.store.DeleteFolderChildren(ctx, entry.FullPath); storeDeletionErr != nil {
 		return nil, fmt.Errorf("filer store delete: %v", storeDeletionErr)
 	}
-	f.NotifyUpdateEvent(entry, nil, shouldDeleteChunks)
 
 	return chunks, nil
 }
@@ -104,6 +104,9 @@ func (f *Filer) doDeleteEntryMetaAndData(ctx context.Context, entry *Entry, shou
 
 	if storeDeletionErr := f.store.DeleteEntry(ctx, entry.FullPath); storeDeletionErr != nil {
 		return fmt.Errorf("filer store delete: %v", storeDeletionErr)
+	}
+	if entry.IsDirectory() {
+		f.cacheDelDirectory(string(entry.FullPath))
 	}
 	f.NotifyUpdateEvent(entry, nil, shouldDeleteChunks)
 

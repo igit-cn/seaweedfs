@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/chrislusf/seaweedfs/weed/glog"
+	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
 	"github.com/chrislusf/seaweedfs/weed/server"
 	"github.com/chrislusf/seaweedfs/weed/util"
 )
@@ -165,38 +166,32 @@ func (s3a *S3ApiServer) DeleteMultipleObjectsHandler(w http.ResponseWriter, r *h
 		return
 	}
 
-	var index int
-
 	var deletedObjects []ObjectIdentifier
 	var deleteErrors []DeleteError
-	s3a.streamRemove(deleteObjects.Quiet, func() (finished bool, parentDirectoryPath string, entryName string, isDeleteData, isRecursive bool) {
-		if index >= len(deleteObjects.Objects) {
-			finished = true
-			return
-		}
 
-		object := deleteObjects.Objects[index]
+	s3a.WithFilerClient(func(client filer_pb.SeaweedFilerClient) error {
 
-		lastSeparator := strings.LastIndex(object.ObjectName, "/")
-		parentDirectoryPath, entryName, isDeleteData, isRecursive = "/", object.ObjectName, true, false
-		if lastSeparator > 0 && lastSeparator+1 < len(object.ObjectName) {
-			entryName = object.ObjectName[lastSeparator+1:]
-			parentDirectoryPath = "/" + object.ObjectName[:lastSeparator]
+		for _, object := range deleteObjects.Objects {
+			lastSeparator := strings.LastIndex(object.ObjectName, "/")
+			parentDirectoryPath, entryName, isDeleteData, isRecursive := "/", object.ObjectName, true, true
+			if lastSeparator > 0 && lastSeparator+1 < len(object.ObjectName) {
+				entryName = object.ObjectName[lastSeparator+1:]
+				parentDirectoryPath = "/" + object.ObjectName[:lastSeparator]
+			}
+			parentDirectoryPath = fmt.Sprintf("%s/%s%s", s3a.option.BucketsPath, bucket, parentDirectoryPath)
+
+			err := doDeleteEntry(client, parentDirectoryPath, entryName, isDeleteData, isRecursive)
+			if err == nil {
+				deletedObjects = append(deletedObjects, object)
+			} else {
+				deleteErrors = append(deleteErrors, DeleteError{
+					Code:    "",
+					Message: err.Error(),
+					Key:     object.ObjectName,
+				})
+			}
 		}
-		parentDirectoryPath = fmt.Sprintf("%s/%s%s", s3a.option.BucketsPath, bucket, parentDirectoryPath)
-		return
-	}, func(err string) {
-		object := deleteObjects.Objects[index]
-		if err == "" {
-			deletedObjects = append(deletedObjects, object)
-		} else {
-			deleteErrors = append(deleteErrors, DeleteError{
-				Code:    "",
-				Message: err,
-				Key:     object.ObjectName,
-			})
-		}
-		index++
+		return nil
 	})
 
 	deleteResp := DeleteObjectsResponse{}
@@ -223,7 +218,6 @@ func (s3a *S3ApiServer) proxyToFiler(w http.ResponseWriter, r *http.Request, des
 
 	proxyReq.Header.Set("Host", s3a.option.Filer)
 	proxyReq.Header.Set("X-Forwarded-For", r.RemoteAddr)
-	proxyReq.Header.Set("Etag-MD5", "True")
 
 	for header, values := range r.Header {
 		for _, value := range values {
