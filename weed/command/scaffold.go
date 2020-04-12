@@ -18,7 +18,7 @@ var cmdScaffold = &Command{
 	For example, the filer.toml mysql password can be overwritten by environment variable
 		export WEED_MYSQL_PASSWORD=some_password
 	Environment variable rules:
-		* Prefix fix with "WEED_"
+		* Prefix the variable name with "WEED_"
 		* Upppercase the reset of variable name.
 		* Replace '.' with '_'
 
@@ -359,11 +359,13 @@ scripts = """
   ec.rebuild -force
   ec.balance -force
   volume.balance -force
+  volume.fix.replication
 """
 sleep_minutes = 17          # sleep minutes between each script execution
 
 [master.filer]
-default_filer_url = "http://localhost:8888/"
+default = "localhost:8888"    # used by maintenance scripts if the scripts needs to use fs related commands
+
 
 [master.sequencer]
 type = "memory"     # Choose [memory|etcd] type for storing the file id sequence

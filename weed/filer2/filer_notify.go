@@ -45,13 +45,11 @@ func (f *Filer) NotifyUpdateEvent(oldEntry, newEntry *Entry, deleteChunks bool) 
 		notification.Queue.SendMessage(fullpath, eventNotification)
 	}
 
-	if false {
-		f.logMetaEvent(time.Now(), fullpath, eventNotification)
-	}
+	f.logMetaEvent(fullpath, eventNotification)
 
 }
 
-func (f *Filer) logMetaEvent(ts time.Time, fullpath string, eventNotification *filer_pb.EventNotification) {
+func (f *Filer) logMetaEvent(fullpath string, eventNotification *filer_pb.EventNotification) {
 
 	dir, _ := util.FullPath(fullpath).DirAndName()
 
@@ -65,11 +63,14 @@ func (f *Filer) logMetaEvent(ts time.Time, fullpath string, eventNotification *f
 		return
 	}
 
-	f.metaLogBuffer.AddToBuffer(ts, []byte(dir), data)
+	f.metaLogBuffer.AddToBuffer([]byte(dir), data)
 
 }
 
 func (f *Filer) logFlushFunc(startTime, stopTime time.Time, buf []byte) {
+
+	return
+
 	targetFile := fmt.Sprintf("/.meta/log/%04d/%02d/%02d/%02d/%02d/%02d.%09d.log",
 		startTime.Year(), startTime.Month(), startTime.Day(), startTime.Hour(), startTime.Minute(),
 		startTime.Second(), startTime.Nanosecond())
