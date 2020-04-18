@@ -9,12 +9,13 @@ import (
 
 	"github.com/golang/protobuf/proto"
 
+	"github.com/chrislusf/seaweedfs/weed/filer2"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
 	"github.com/chrislusf/seaweedfs/weed/util"
 )
 
 var (
-	logdataFile = flag.String("logdata", "", "log data file saved under /.meta/log/...")
+	logdataFile = flag.String("logdata", "", "log data file saved under "+ filer2.SystemLogDir)
 )
 
 func main() {
@@ -60,10 +61,10 @@ func walkLogEntryFile(dst *os.File) error {
 			return nil
 		}
 
-		event := &filer_pb.FullEventNotification{}
+		event := &filer_pb.SubscribeMetadataResponse{}
 		err = proto.Unmarshal(logEntry.Data, event)
 		if err != nil {
-			log.Printf("unexpected unmarshal filer_pb.FullEventNotification: %v", err)
+			log.Printf("unexpected unmarshal filer_pb.SubscribeMetadataResponse: %v", err)
 			return nil
 		}
 

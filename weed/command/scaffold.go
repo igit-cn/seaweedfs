@@ -76,8 +76,10 @@ const (
 recursive_delete = false
 # directories under this folder will be automatically creating a separate bucket
 buckets_folder = "/buckets"
-# directories under this folder will be store message queue data
-queues_folder = "/queues"
+buckets_fsync = [          # a list of buckets with all write requests fsync=true
+	"important_bucket",
+	"should_always_fsync",
+]
 
 ####################################################
 # The following are filer store options
@@ -139,13 +141,13 @@ hosts=[
 	"localhost:9042",
 ]
 
-[redis]
+[redis2]
 enabled = false
 address  = "localhost:6379"
 password = ""
 database = 0
 
-[redis_cluster]
+[redis_cluster2]
 enabled = false
 addresses = [
     "localhost:30001",

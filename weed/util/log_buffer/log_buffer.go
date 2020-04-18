@@ -51,7 +51,7 @@ func NewLogBuffer(flushInterval time.Duration, flushFn func(startTime, stopTime 
 	return lb
 }
 
-func (m *LogBuffer) AddToBuffer(key, data []byte) {
+func (m *LogBuffer) AddToBuffer(partitionKey, data []byte) {
 
 	m.Lock()
 	defer func() {
@@ -65,7 +65,7 @@ func (m *LogBuffer) AddToBuffer(key, data []byte) {
 	ts := time.Now()
 	logEntry := &filer_pb.LogEntry{
 		TsNs:             ts.UnixNano(),
-		PartitionKeyHash: util.HashToInt32(key),
+		PartitionKeyHash: util.HashToInt32(partitionKey),
 		Data:             data,
 	}
 
@@ -163,7 +163,7 @@ func (m *LogBuffer) ReadFromBuffer(lastReadTime time.Time) (ts time.Time, buffer
 	/*
 		for i, pos := range m.idx {
 			logEntry, ts := readTs(m.buf, pos)
-			event := &filer_pb.FullEventNotification{}
+			event := &filer_pb.SubscribeMetadataResponse{}
 			proto.Unmarshal(logEntry.Data, event)
 			entry := event.EventNotification.OldEntry
 			if entry == nil {
