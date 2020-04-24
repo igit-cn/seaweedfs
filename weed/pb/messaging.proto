@@ -47,7 +47,7 @@ message SubscriberMessage {
 }
 
 message Message {
-    int64 timestamp = 1 [jstype = JS_STRING]; // When the message was received by the broker
+    int64 event_time_ns = 1 [jstype = JS_STRING];
     bytes key = 2; // Message key
     bytes value = 3; // Message payload
     map<string, bytes> headers = 4; // Message headers
@@ -68,12 +68,7 @@ message PublishRequest {
         int32 partition = 3;
     }
     InitMessage init = 1;
-    message DataMessage {
-        bytes key = 1; // Message key
-        bytes value = 2; // Message payload
-        map<string, bytes> headers = 3; // Message headers
-    }
-    DataMessage data = 2;
+    Message data = 2;
 }
 
 message PublishResponse {
@@ -107,4 +102,11 @@ message TopicConfiguration {
     int32 partition_count = 1;
     string collection = 2;
     string replication = 3;
+    bool is_transient = 4;
+    enum Partitioning {
+        NonNullKeyHash = 0; // If not null, hash by key value. If null, round robin
+        KeyHash = 1; // hash by key value
+        RoundRobin = 2; // round robin pick one partition
+    }
+    Partitioning partitoning = 5;
 }

@@ -14,6 +14,7 @@ import (
 
 type MasterClient struct {
 	clientType     string
+	clientHost     string
 	grpcPort       uint32
 	currentMaster  string
 	masters        []string
@@ -22,9 +23,10 @@ type MasterClient struct {
 	vidMap
 }
 
-func NewMasterClient(grpcDialOption grpc.DialOption, clientType string, clientGrpcPort uint32, masters []string) *MasterClient {
+func NewMasterClient(grpcDialOption grpc.DialOption, clientType string, clientHost string, clientGrpcPort uint32, masters []string) *MasterClient {
 	return &MasterClient{
 		clientType:     clientType,
+		clientHost:     clientHost,
 		grpcPort:       clientGrpcPort,
 		masters:        masters,
 		grpcDialOption: grpcDialOption,
@@ -119,6 +121,9 @@ func (mc *MasterClient) tryConnectToMaster(master string) (nextHintedLeader stri
 }
 
 func (mc *MasterClient) WithClient(fn func(client master_pb.SeaweedClient) error) error {
+	for mc.currentMaster == "" {
+		time.Sleep(3 * time.Second)
+	}
 	return pb.WithMasterClient(mc.currentMaster, mc.grpcDialOption, func(client master_pb.SeaweedClient) error {
 		return fn(client)
 	})
