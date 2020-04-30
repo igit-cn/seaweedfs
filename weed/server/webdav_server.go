@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chrislusf/seaweedfs/weed/util/grace"
 	"golang.org/x/net/webdav"
 	"google.golang.org/grpc"
 
@@ -100,7 +101,7 @@ type WebDavFile struct {
 func NewWebDavFileSystem(option *WebDavOption) (webdav.FileSystem, error) {
 
 	chunkCache := chunk_cache.NewChunkCache(256, option.CacheDir, option.CacheSizeMB)
-	util.OnInterrupt(func() {
+	grace.OnInterrupt(func() {
 		chunkCache.Shutdown()
 	})
 	return &WebDavFileSystem{
@@ -108,6 +109,8 @@ func NewWebDavFileSystem(option *WebDavOption) (webdav.FileSystem, error) {
 		chunkCache: chunkCache,
 	}, nil
 }
+
+var _ = filer_pb.FilerClient(&WebDavFileSystem{})
 
 func (fs *WebDavFileSystem) WithFilerClient(fn func(filer_pb.SeaweedFilerClient) error) error {
 
@@ -508,7 +511,7 @@ func (f *WebDavFile) Readdir(count int) (ret []os.FileInfo, err error) {
 
 	dir, _ := util.FullPath(f.name).DirAndName()
 
-	err = filer_pb.ReadDirAllEntries(f.fs, util.FullPath(dir), "", func(entry *filer_pb.Entry, isLast bool) {
+	err = filer_pb.ReadDirAllEntries(f.fs, util.FullPath(dir), "", func(entry *filer_pb.Entry, isLast bool) error {
 		fi := FileInfo{
 			size:          int64(filer2.TotalSize(entry.GetChunks())),
 			name:          entry.Name,
@@ -522,6 +525,7 @@ func (f *WebDavFile) Readdir(count int) (ret []os.FileInfo, err error) {
 		}
 		glog.V(4).Infof("entry: %v", fi.name)
 		ret = append(ret, &fi)
+		return nil
 	})
 
 	old := f.off

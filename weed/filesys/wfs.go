@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chrislusf/seaweedfs/weed/util/grace"
 	"github.com/karlseguin/ccache"
 	"google.golang.org/grpc"
 
@@ -89,17 +90,18 @@ func NewSeaweedFileSystem(option *Option) *WFS {
 	}
 	if option.CacheSizeMB > 0 {
 		wfs.chunkCache = chunk_cache.NewChunkCache(256, option.CacheDir, option.CacheSizeMB)
-		util.OnInterrupt(func() {
+		grace.OnInterrupt(func() {
 			wfs.chunkCache.Shutdown()
 		})
 	}
 	if wfs.option.AsyncMetaDataCaching {
 		wfs.metaCache = meta_cache.NewMetaCache(path.Join(option.CacheDir, "meta"))
-		if err := meta_cache.InitMetaCache(wfs.metaCache, wfs, wfs.option.FilerMountRootPath); err != nil{
+		startTime := time.Now()
+		if err := meta_cache.InitMetaCache(wfs.metaCache, wfs, wfs.option.FilerMountRootPath); err != nil {
 			glog.V(0).Infof("failed to init meta cache: %v", err)
 		} else {
-			go meta_cache.SubscribeMetaEvents(wfs.metaCache, wfs, wfs.option.FilerMountRootPath)
-			util.OnInterrupt(func() {
+			go meta_cache.SubscribeMetaEvents(wfs.metaCache, wfs, wfs.option.FilerMountRootPath, startTime.UnixNano())
+			grace.OnInterrupt(func() {
 				wfs.metaCache.Shutdown()
 			})
 		}
@@ -114,6 +116,8 @@ func NewSeaweedFileSystem(option *Option) *WFS {
 func (wfs *WFS) Root() (fs.Node, error) {
 	return wfs.root, nil
 }
+
+var _ = filer_pb.FilerClient(&WFS{})
 
 func (wfs *WFS) WithFilerClient(fn func(filer_pb.SeaweedFilerClient) error) error {
 
