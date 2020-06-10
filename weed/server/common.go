@@ -46,6 +46,12 @@ func writeJson(w http.ResponseWriter, r *http.Request, httpStatus int, obj inter
 	if err != nil {
 		return
 	}
+
+	if httpStatus >= 400 {
+		glog.V(0).Infof("response method:%s URL:%s with httpStatus:%d and JSON:%s",
+			r.Method, r.URL.String(), httpStatus, string(bytes))
+	}
+
 	callback := r.FormValue("callback")
 	if callback == "" {
 		w.Header().Set("Content-Type", "application/json")
@@ -185,19 +191,19 @@ func parseURLPath(path string) (vid, fid, filename, ext string, isVolumeIdOnly b
 
 func statsHealthHandler(w http.ResponseWriter, r *http.Request) {
 	m := make(map[string]interface{})
-	m["Version"] = util.VERSION
+	m["Version"] = util.Version()
 	writeJsonQuiet(w, r, http.StatusOK, m)
 }
 func statsCounterHandler(w http.ResponseWriter, r *http.Request) {
 	m := make(map[string]interface{})
-	m["Version"] = util.VERSION
+	m["Version"] = util.Version()
 	m["Counters"] = serverStats
 	writeJsonQuiet(w, r, http.StatusOK, m)
 }
 
 func statsMemoryHandler(w http.ResponseWriter, r *http.Request) {
 	m := make(map[string]interface{})
-	m["Version"] = util.VERSION
+	m["Version"] = util.Version()
 	m["Memory"] = stats.MemStat()
 	writeJsonQuiet(w, r, http.StatusOK, m)
 }

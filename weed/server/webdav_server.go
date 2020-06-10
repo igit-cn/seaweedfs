@@ -418,17 +418,7 @@ func (f *WebDavFile) Write(buf []byte) (int, error) {
 		return 0, fmt.Errorf("upload result: %v", uploadResult.Error)
 	}
 
-	chunk := &filer_pb.FileChunk{
-		FileId:    fileId,
-		Offset:    f.off,
-		Size:      uint64(len(buf)),
-		Mtime:     time.Now().UnixNano(),
-		ETag:      uploadResult.ETag,
-		CipherKey: uploadResult.CipherKey,
-		IsGzipped: uploadResult.Gzip > 0,
-	}
-
-	f.entry.Chunks = append(f.entry.Chunks, chunk)
+	f.entry.Chunks = append(f.entry.Chunks, uploadResult.ToPbFileChunk(fileId, f.off))
 
 	err = f.fs.WithFilerClient(func(client filer_pb.SeaweedFilerClient) error {
 		f.entry.Attributes.Mtime = time.Now().Unix()
@@ -496,6 +486,10 @@ func (f *WebDavFile) Read(p []byte) (readSize int, err error) {
 
 	glog.V(3).Infof("WebDavFileSystem.Read %v: [%d,%d)", f.name, f.off, f.off+int64(readSize))
 	f.off += int64(readSize)
+
+	if err == io.EOF {
+		err = nil
+	}
 
 	if err != nil {
 		glog.Errorf("file read %s: %v", f.name, err)

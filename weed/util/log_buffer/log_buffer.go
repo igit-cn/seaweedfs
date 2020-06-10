@@ -34,6 +34,7 @@ type LogBuffer struct {
 	notifyFn      func()
 	isStopping    bool
 	flushChan     chan *dataToFlush
+	lastTsNs      int64
 	sync.RWMutex
 }
 
@@ -64,8 +65,15 @@ func (m *LogBuffer) AddToBuffer(partitionKey, data []byte) {
 
 	// need to put the timestamp inside the lock
 	ts := time.Now()
+	tsNs := ts.UnixNano()
+	if m.lastTsNs >= tsNs {
+		// this is unlikely to happen, but just in case
+		tsNs = m.lastTsNs + 1
+		ts = time.Unix(0, tsNs)
+	}
+	m.lastTsNs = tsNs
 	logEntry := &filer_pb.LogEntry{
-		TsNs:             ts.UnixNano(),
+		TsNs:             tsNs,
 		PartitionKeyHash: util.HashToInt32(partitionKey),
 		Data:             data,
 	}
@@ -93,18 +101,19 @@ func (m *LogBuffer) AddToBuffer(partitionKey, data []byte) {
 	copy(m.buf[m.pos+4:m.pos+4+size], logEntryData)
 	m.pos += size + 4
 
-	// fmt.Printf("entry size %d total %d count %d\n", size, m.pos, len(m.idx))
+	// fmt.Printf("entry size %d total %d count %d, buffer:%p\n", size, m.pos, len(m.idx), m)
 
 }
 
 func (m *LogBuffer) Shutdown() {
+	m.Lock()
+	defer m.Unlock()
+
 	if m.isStopping {
 		return
 	}
 	m.isStopping = true
-	m.Lock()
 	toFlush := m.copyToFlush()
-	m.Unlock()
 	m.flushChan <- toFlush
 	close(m.flushChan)
 }
@@ -112,6 +121,7 @@ func (m *LogBuffer) Shutdown() {
 func (m *LogBuffer) loopFlush() {
 	for d := range m.flushChan {
 		if d != nil {
+			// fmt.Printf("flush [%v, %v] size %d\n", d.startTime, d.stopTime, len(d.data.Bytes()))
 			m.flushFn(d.startTime, d.stopTime, d.data.Bytes())
 			d.releaseMemory()
 		}
@@ -122,10 +132,14 @@ func (m *LogBuffer) loopInterval() {
 	for !m.isStopping {
 		time.Sleep(m.flushInterval)
 		m.Lock()
+		if m.isStopping {
+			m.Unlock()
+			return
+		}
 		// println("loop interval")
 		toFlush := m.copyToFlush()
-		m.Unlock()
 		m.flushChan <- toFlush
+		m.Unlock()
 	}
 }
 
@@ -156,7 +170,12 @@ func (m *LogBuffer) ReadFromBuffer(lastReadTime time.Time) (bufferCopy *bytes.Bu
 	m.RLock()
 	defer m.RUnlock()
 
-	// fmt.Printf("read from buffer: %v last stop time: %v\n", lastReadTime.UnixNano(), m.stopTime.UnixNano())
+	/*
+		fmt.Printf("read buffer %p: %v last stop time: [%v,%v], pos %d, entries:%d, prevBufs:%d\n", m, lastReadTime, m.startTime, m.stopTime, m.pos, len(m.idx), len(m.prevBuffers.buffers))
+		for i, prevBuf := range m.prevBuffers.buffers {
+			fmt.Printf("  prev %d : %s\n", i, prevBuf.String())
+		}
+	*/
 
 	if lastReadTime.Equal(m.stopTime) {
 		return nil
@@ -173,6 +192,7 @@ func (m *LogBuffer) ReadFromBuffer(lastReadTime time.Time) (bufferCopy *bytes.Bu
 					// println("return the earliest in memory", buf.startTime.UnixNano())
 					return copiedBytes(buf.buf[:buf.size])
 				}
+				// println("return the", i, "th in memory", buf.startTime.UnixNano())
 				return copiedBytes(buf.buf[:buf.size])
 			}
 			if !buf.startTime.After(lastReadTime) && buf.stopTime.After(lastReadTime) {
@@ -181,6 +201,7 @@ func (m *LogBuffer) ReadFromBuffer(lastReadTime time.Time) (bufferCopy *bytes.Bu
 				return copiedBytes(buf.buf[pos:buf.size])
 			}
 		}
+		// println("return the current buf", lastReadTime.UnixNano())
 		return copiedBytes(m.buf[:m.pos])
 	}
 

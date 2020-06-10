@@ -37,7 +37,7 @@ type MasterOption struct {
 	MetaFolder              string
 	VolumeSizeLimitMB       uint
 	VolumePreallocate       bool
-	PulseSeconds            int
+	// PulseSeconds            int
 	DefaultReplicaPlacement string
 	GarbageThreshold        float64
 	WhiteList               []string
@@ -66,8 +66,7 @@ type MasterServer struct {
 
 	MasterClient *wdclient.MasterClient
 
-	adminAccessSecret   int64
-	adminAccessLockTime time.Time
+	adminLocks          *AdminLocks
 }
 
 func NewMasterServer(r *mux.Router, option *MasterOption, peers []string) *MasterServer {
@@ -96,6 +95,7 @@ func NewMasterServer(r *mux.Router, option *MasterOption, peers []string) *Maste
 		clientChans:     make(map[string]chan *master_pb.VolumeLocation),
 		grpcDialOption:  grpcDialOption,
 		MasterClient:    wdclient.NewMasterClient(grpcDialOption, "master", option.Host, 0, peers),
+		adminLocks:      NewAdminLocks(),
 	}
 	ms.bounedLeaderChan = make(chan int, 16)
 
@@ -103,7 +103,7 @@ func NewMasterServer(r *mux.Router, option *MasterOption, peers []string) *Maste
 	if nil == seq {
 		glog.Fatalf("create sequencer failed.")
 	}
-	ms.Topo = topology.NewTopology("topo", seq, uint64(ms.option.VolumeSizeLimitMB)*1024*1024, ms.option.PulseSeconds, replicationAsMin)
+	ms.Topo = topology.NewTopology("topo", seq, uint64(ms.option.VolumeSizeLimitMB)*1024*1024, 5, replicationAsMin)
 	ms.vg = topology.NewDefaultVolumeGrowth()
 	glog.V(0).Infoln("Volume Size Limit is", ms.option.VolumeSizeLimitMB, "MB")
 
@@ -156,7 +156,7 @@ func (ms *MasterServer) SetRaftServer(raftServer *RaftServer) {
 	}
 }
 
-func (ms *MasterServer) proxyToLeader(f func(w http.ResponseWriter, r *http.Request)) func(w http.ResponseWriter, r *http.Request) {
+func (ms *MasterServer) proxyToLeader(f http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if ms.Topo.IsLeader() {
 			f(w, r)

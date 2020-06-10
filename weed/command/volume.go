@@ -40,7 +40,7 @@ type VolumeServerOptions struct {
 	publicUrl             *string
 	bindIp                *string
 	masters               *string
-	pulseSeconds          *int
+	// pulseSeconds          *int
 	idleConnectionTimeout *int
 	dataCenter            *string
 	rack                  *string
@@ -52,6 +52,7 @@ type VolumeServerOptions struct {
 	memProfile            *string
 	compactionMBPerSecond *int
 	fileSizeLimitMB       *int
+	minFreeSpacePercent   []float32
 }
 
 func init() {
@@ -62,7 +63,7 @@ func init() {
 	v.publicUrl = cmdVolume.Flag.String("publicUrl", "", "Publicly accessible address")
 	v.bindIp = cmdVolume.Flag.String("ip.bind", "0.0.0.0", "ip address to bind to")
 	v.masters = cmdVolume.Flag.String("mserver", "localhost:9333", "comma-separated master servers")
-	v.pulseSeconds = cmdVolume.Flag.Int("pulseSeconds", 5, "number of seconds between heartbeats, must be smaller than or equal to the master's setting")
+	// v.pulseSeconds = cmdVolume.Flag.Int("pulseSeconds", 5, "number of seconds between heartbeats, must be smaller than or equal to the master's setting")
 	v.idleConnectionTimeout = cmdVolume.Flag.Int("idleTimeout", 30, "connection idle seconds")
 	v.dataCenter = cmdVolume.Flag.String("dataCenter", "", "current volume server's data center name")
 	v.rack = cmdVolume.Flag.String("rack", "", "current volume server's rack name")
@@ -87,6 +88,7 @@ var (
 	volumeFolders         = cmdVolume.Flag.String("dir", os.TempDir(), "directories to store data files. dir[,dir]...")
 	maxVolumeCounts       = cmdVolume.Flag.String("max", "7", "maximum numbers of volumes, count[,count]... If set to zero on non-windows OS, the limit will be auto configured.")
 	volumeWhiteListOption = cmdVolume.Flag.String("whiteList", "", "comma separated Ip addresses having write permission. No limit if empty.")
+	minFreeSpacePercent   = cmdVolume.Flag.String("minFreeSpacePercent ", "0", "minimum free disk space(in percents). If free disk space lower this value - all volumes marks as ReadOnly")
 )
 
 func runVolume(cmd *Command, args []string) bool {
@@ -96,12 +98,12 @@ func runVolume(cmd *Command, args []string) bool {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	grace.SetupProfiling(*v.cpuProfile, *v.memProfile)
 
-	v.startVolumeServer(*volumeFolders, *maxVolumeCounts, *volumeWhiteListOption)
+	v.startVolumeServer(*volumeFolders, *maxVolumeCounts, *volumeWhiteListOption, *minFreeSpacePercent)
 
 	return true
 }
 
-func (v VolumeServerOptions) startVolumeServer(volumeFolders, maxVolumeCounts, volumeWhiteListOption string) {
+func (v VolumeServerOptions) startVolumeServer(volumeFolders, maxVolumeCounts, volumeWhiteListOption, minFreeSpacePercent string) {
 
 	// Set multiple folders and each folder's max volume count limit'
 	v.folders = strings.Split(volumeFolders, ",")
@@ -116,6 +118,16 @@ func (v VolumeServerOptions) startVolumeServer(volumeFolders, maxVolumeCounts, v
 	if len(v.folders) != len(v.folderMaxLimits) {
 		glog.Fatalf("%d directories by -dir, but only %d max is set by -max", len(v.folders), len(v.folderMaxLimits))
 	}
+	minFreeSpacePercentStrings := strings.Split(minFreeSpacePercent, ",")
+	for _, freeString := range minFreeSpacePercentStrings {
+
+		if value, e := strconv.ParseFloat(freeString, 32); e == nil {
+			v.minFreeSpacePercent = append(v.minFreeSpacePercent, float32(value))
+		} else {
+			glog.Fatalf("The value specified in -minFreeSpacePercent not a valid value %s", freeString)
+		}
+	}
+
 	for _, folder := range v.folders {
 		if err := util.TestFolderWritable(folder); err != nil {
 			glog.Fatalf("Check Data Folder(-dir) Writable %s : %s", folder, err)
@@ -159,9 +171,9 @@ func (v VolumeServerOptions) startVolumeServer(volumeFolders, maxVolumeCounts, v
 
 	volumeServer := weed_server.NewVolumeServer(volumeMux, publicVolumeMux,
 		*v.ip, *v.port, *v.publicUrl,
-		v.folders, v.folderMaxLimits,
+		v.folders, v.folderMaxLimits, v.minFreeSpacePercent,
 		volumeNeedleMapKind,
-		strings.Split(masters, ","), *v.pulseSeconds, *v.dataCenter, *v.rack,
+		strings.Split(masters, ","), 5, *v.dataCenter, *v.rack,
 		v.whiteList,
 		*v.fixJpgOrientation, *v.readRedirect,
 		*v.compactionMBPerSecond,
@@ -250,7 +262,7 @@ func (v VolumeServerOptions) startGrpcService(vs volume_server_pb.VolumeServerSe
 
 func (v VolumeServerOptions) startPublicHttpService(handler http.Handler) httpdown.Server {
 	publicListeningAddress := *v.bindIp + ":" + strconv.Itoa(*v.publicPort)
-	glog.V(0).Infoln("Start Seaweed volume server", util.VERSION, "public at", publicListeningAddress)
+	glog.V(0).Infoln("Start Seaweed volume server", util.Version(), "public at", publicListeningAddress)
 	publicListener, e := util.NewListener(publicListeningAddress, time.Duration(*v.idleConnectionTimeout)*time.Second)
 	if e != nil {
 		glog.Fatalf("Volume server listener error:%v", e)
@@ -277,7 +289,7 @@ func (v VolumeServerOptions) startClusterHttpService(handler http.Handler) httpd
 	}
 
 	listeningAddress := *v.bindIp + ":" + strconv.Itoa(*v.port)
-	glog.V(0).Infof("Start Seaweed volume server %s at %s", util.VERSION, listeningAddress)
+	glog.V(0).Infof("Start Seaweed volume server %s at %s", util.Version(), listeningAddress)
 	listener, e := util.NewListener(listeningAddress, time.Duration(*v.idleConnectionTimeout)*time.Second)
 	if e != nil {
 		glog.Fatalf("Volume server listener error:%v", e)

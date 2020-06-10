@@ -3,7 +3,7 @@ package broker
 import (
 	"context"
 	"fmt"
-	"time"
+	"io"
 
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/operation"
@@ -23,22 +23,13 @@ func (broker *MessageBroker) appendToFile(targetFile string, topicConfig *messag
 
 	dir, name := util.FullPath(targetFile).DirAndName()
 
-	chunk := &filer_pb.FileChunk{
-		FileId:    assignResult.Fid,
-		Offset:    0, // needs to be fixed during appending
-		Size:      uint64(uploadResult.Size),
-		Mtime:     time.Now().UnixNano(),
-		ETag:      uploadResult.ETag,
-		IsGzipped: uploadResult.Gzip > 0,
-	}
-
 	// append the chunk
 	if err := broker.WithFilerClient(func(client filer_pb.SeaweedFilerClient) error {
 
 		request := &filer_pb.AppendToEntryRequest{
 			Directory: dir,
 			EntryName: name,
-			Chunks:    []*filer_pb.FileChunk{chunk},
+			Chunks:    []*filer_pb.FileChunk{uploadResult.ToPbFileChunk(assignResult.Fid, 0)},
 		}
 
 		_, err := client.AppendToEntry(context.Background(), request)
@@ -104,6 +95,9 @@ func (broker *MessageBroker) WithFilerClient(fn func(filer_pb.SeaweedFilerClient
 
 	for _, filer := range broker.option.Filers {
 		if err = pb.WithFilerClient(filer, broker.grpcDialOption, fn); err != nil {
+			if err == io.EOF {
+				return
+			}
 			glog.V(0).Infof("fail to connect to %s: %v", filer, err)
 		} else {
 			break

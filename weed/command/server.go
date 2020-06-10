@@ -18,10 +18,11 @@ type ServerOptions struct {
 }
 
 var (
-	serverOptions ServerOptions
-	masterOptions MasterOptions
-	filerOptions  FilerOptions
-	s3Options     S3Options
+	serverOptions    ServerOptions
+	masterOptions    MasterOptions
+	filerOptions     FilerOptions
+	s3Options        S3Options
+	msgBrokerOptions MessageBrokerOptions
 )
 
 func init() {
@@ -54,9 +55,12 @@ var (
 	serverDisableHttp         = cmdServer.Flag.Bool("disableHttp", false, "disable http requests, only gRPC operations are allowed.")
 	volumeDataFolders         = cmdServer.Flag.String("dir", os.TempDir(), "directories to store data files. dir[,dir]...")
 	volumeMaxDataVolumeCounts = cmdServer.Flag.String("volume.max", "7", "maximum numbers of volumes, count[,count]... If set to zero on non-windows OS, the limit will be auto configured.")
-	pulseSeconds              = cmdServer.Flag.Int("pulseSeconds", 5, "number of seconds between heartbeats")
+	volumeMinFreeSpacePercent = cmdServer.Flag.String("volume.minFreeSpacePercent", "0", "minimum free disk space(in percents). If free disk space lower this value - all volumes marks as ReadOnly")
+
+	// pulseSeconds              = cmdServer.Flag.Int("pulseSeconds", 5, "number of seconds between heartbeats")
 	isStartingFiler           = cmdServer.Flag.Bool("filer", false, "whether to start filer")
 	isStartingS3              = cmdServer.Flag.Bool("s3", false, "whether to start S3 gateway")
+	isStartingMsgBroker       = cmdServer.Flag.Bool("msgBroker", false, "whether to start message broker")
 
 	serverWhiteList []string
 )
@@ -98,6 +102,8 @@ func init() {
 	s3Options.tlsCertificate = cmdServer.Flag.String("s3.cert.file", "", "path to the TLS certificate file")
 	s3Options.config = cmdServer.Flag.String("s3.config", "", "path to the config file")
 
+	msgBrokerOptions.port = cmdServer.Flag.Int("msgBroker.port", 17777, "broker gRPC listen port")
+
 }
 
 func runServer(cmd *Command, args []string) bool {
@@ -117,6 +123,9 @@ func runServer(cmd *Command, args []string) bool {
 	if *isStartingS3 {
 		*isStartingFiler = true
 	}
+	if *isStartingMsgBroker {
+		*isStartingFiler = true
+	}
 
 	_, peerList := checkPeers(*serverIp, *masterOptions.port, *masterOptions.peers)
 	peers := strings.Join(peerList, ",")
@@ -133,9 +142,10 @@ func runServer(cmd *Command, args []string) bool {
 	serverOptions.v.idleConnectionTimeout = serverTimeout
 	serverOptions.v.dataCenter = serverDataCenter
 	serverOptions.v.rack = serverRack
+	msgBrokerOptions.ip = serverIp
 
-	serverOptions.v.pulseSeconds = pulseSeconds
-	masterOptions.pulseSeconds = pulseSeconds
+	// serverOptions.v.pulseSeconds = pulseSeconds
+	// masterOptions.pulseSeconds = pulseSeconds
 
 	masterOptions.whiteList = serverWhiteListOption
 
@@ -145,6 +155,7 @@ func runServer(cmd *Command, args []string) bool {
 
 	filerAddress := fmt.Sprintf("%s:%d", *serverIp, *filerOptions.port)
 	s3Options.filer = &filerAddress
+	msgBrokerOptions.filer = &filerAddress
 
 	if *filerOptions.defaultReplicaPlacement == "" {
 		*filerOptions.defaultReplicaPlacement = *masterOptions.defaultReplication
@@ -188,9 +199,17 @@ func runServer(cmd *Command, args []string) bool {
 		}()
 	}
 
+	if *isStartingMsgBroker {
+		go func() {
+			time.Sleep(2 * time.Second)
+			msgBrokerOptions.startQueueServer()
+		}()
+	}
+
 	// start volume server
 	{
-		go serverOptions.v.startVolumeServer(*volumeDataFolders, *volumeMaxDataVolumeCounts, *serverWhiteListOption)
+		go serverOptions.v.startVolumeServer(*volumeDataFolders, *volumeMaxDataVolumeCounts, *serverWhiteListOption, *volumeMinFreeSpacePercent)
+
 	}
 
 	startMaster(masterOptions, serverWhiteList)

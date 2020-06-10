@@ -34,6 +34,10 @@ func runMount(cmd *Command, args []string) bool {
 		return false
 	}
 
+	if len(args) > 0 {
+		return false
+	}
+
 	return RunMount(&mountOptions, os.FileMode(umask))
 }
 
@@ -69,7 +73,7 @@ func RunMount(option *MountOptions, umask os.FileMode) bool {
 
 	util.LoadConfiguration("security", false)
 
-	fmt.Printf("This is SeaweedFS version %s %s %s\n", util.VERSION, runtime.GOOS, runtime.GOARCH)
+	fmt.Printf("This is SeaweedFS version %s %s %s\n", util.Version(), runtime.GOOS, runtime.GOARCH)
 	if dir == "" {
 		fmt.Printf("Please specify the mount directory via \"-dir\"")
 		return false
@@ -137,26 +141,13 @@ func RunMount(option *MountOptions, umask os.FileMode) bool {
 		options = append(options, fuse.AllowNonEmptyMount())
 	}
 
-	// mount
-	c, err := fuse.Mount(dir, options...)
-	if err != nil {
-		glog.V(0).Infof("mount: %v", err)
-		return true
-	}
-	defer fuse.Unmount(dir)
-
-	grace.OnInterrupt(func() {
-		fuse.Unmount(dir)
-		c.Close()
-	})
-
 	// find mount point
 	mountRoot := filerMountRootPath
 	if mountRoot != "/" && strings.HasSuffix(mountRoot, "/") {
 		mountRoot = mountRoot[0 : len(mountRoot)-1]
 	}
 
-	err = fs.Serve(c, filesys.NewSeaweedFileSystem(&filesys.Option{
+	seaweedFileSystem := filesys.NewSeaweedFileSystem(&filesys.Option{
 		FilerGrpcAddress:            filerGrpcAddress,
 		GrpcDialOption:              grpcDialOption,
 		FilerMountRootPath:          mountRoot,
@@ -178,7 +169,23 @@ func RunMount(option *MountOptions, umask os.FileMode) bool {
 		OutsideContainerClusterMode: *mountOptions.outsideContainerClusterMode,
 		AsyncMetaDataCaching:        *mountOptions.asyncMetaDataCaching,
 		Cipher:                      cipher,
-	}))
+	})
+
+	// mount
+	c, err := fuse.Mount(dir, options...)
+	if err != nil {
+		glog.V(0).Infof("mount: %v", err)
+		return true
+	}
+	defer fuse.Unmount(dir)
+
+	grace.OnInterrupt(func() {
+		fuse.Unmount(dir)
+		c.Close()
+	})
+
+	glog.V(0).Infof("mounted %s%s to %s", filer, mountRoot, dir)
+	err = fs.Serve(c, seaweedFileSystem)
 
 	// check if the mount process has an error to report
 	<-c.Ready
