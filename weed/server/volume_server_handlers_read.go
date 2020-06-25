@@ -142,19 +142,19 @@ func (vs *VolumeServer) GetOrHeadHandler(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if ext != ".gz" {
-		if n.IsGzipped() {
-			if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-				if _, _, _, shouldResize := shouldResizeImages(ext, r); shouldResize {
-					if n.Data, err = util.UnGzipData(n.Data); err != nil {
-						glog.V(0).Infoln("ungzip error:", err, r.URL.Path)
-					}
-				} else {
-					w.Header().Set("Content-Encoding", "gzip")
-				}
-			} else {
-				if n.Data, err = util.UnGzipData(n.Data); err != nil {
+	if ext != ".gz" && ext != ".zst" {
+		if n.IsCompressed() {
+			if _, _, _, shouldResize := shouldResizeImages(ext, r); shouldResize {
+				if n.Data, err = util.DecompressData(n.Data); err != nil {
 					glog.V(0).Infoln("ungzip error:", err, r.URL.Path)
+				}
+			} else if strings.Contains(r.Header.Get("Accept-Encoding"), "zstd") && util.IsZstdContent(n.Data) {
+				w.Header().Set("Content-Encoding", "zstd")
+			} else if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") && util.IsGzippedContent(n.Data) {
+				w.Header().Set("Content-Encoding", "gzip")
+			} else {
+				if n.Data, err = util.DecompressData(n.Data); err != nil {
+					glog.V(0).Infoln("uncompress error:", err, r.URL.Path)
 				}
 			}
 		}
@@ -172,7 +172,7 @@ func (vs *VolumeServer) tryHandleChunkedFile(n *needle.Needle, fileName string, 
 		return false
 	}
 
-	chunkManifest, e := operation.LoadChunkManifest(n.Data, n.IsGzipped())
+	chunkManifest, e := operation.LoadChunkManifest(n.Data, n.IsCompressed())
 	if e != nil {
 		glog.V(0).Infof("load chunked manifest (%s) error: %v", r.URL.Path, e)
 		return false

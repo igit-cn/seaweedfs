@@ -8,6 +8,7 @@ type MountOptions struct {
 	filer                       *string
 	filerMountRootPath          *string
 	dir                         *string
+	dirAutoCreate               *bool
 	dirListCacheLimit           *int64
 	collection                  *string
 	replication                 *string
@@ -20,7 +21,6 @@ type MountOptions struct {
 	umaskString                 *string
 	nonempty                    *bool
 	outsideContainerClusterMode *bool
-	asyncMetaDataCaching        *bool
 }
 
 var (
@@ -34,13 +34,14 @@ func init() {
 	mountOptions.filer = cmdMount.Flag.String("filer", "localhost:8888", "weed filer location")
 	mountOptions.filerMountRootPath = cmdMount.Flag.String("filer.path", "/", "mount this remote path from filer server")
 	mountOptions.dir = cmdMount.Flag.String("dir", ".", "mount weed filer to this directory")
+	mountOptions.dirAutoCreate = cmdMount.Flag.Bool("dirAutoCreate", false, "auto create the directory to mount to")
 	mountOptions.dirListCacheLimit = cmdMount.Flag.Int64("dirListCacheLimit", 1000000, "limit cache size to speed up directory long format listing")
 	mountOptions.collection = cmdMount.Flag.String("collection", "", "collection to create the files")
 	mountOptions.replication = cmdMount.Flag.String("replication", "", "replication(e.g. 000, 001) to create to files. If empty, let filer decide.")
 	mountOptions.ttlSec = cmdMount.Flag.Int("ttl", 0, "file ttl in seconds")
 	mountOptions.chunkSizeLimitMB = cmdMount.Flag.Int("chunkSizeLimitMB", 16, "local write buffer size, also chunk large files")
-	mountOptions.cacheDir = cmdMount.Flag.String("cacheDir", os.TempDir(), "local cache directory for file chunks")
-	mountOptions.cacheSizeMB = cmdMount.Flag.Int64("cacheCapacityMB", 1000, "local cache capacity in MB (0 will disable cache)")
+	mountOptions.cacheDir = cmdMount.Flag.String("cacheDir", os.TempDir(), "local cache directory for file chunks and meta data")
+	mountOptions.cacheSizeMB = cmdMount.Flag.Int64("cacheCapacityMB", 1000, "local file chunk cache capacity in MB (0 will disable cache)")
 	mountOptions.dataCenter = cmdMount.Flag.String("dataCenter", "", "prefer to write to the data center")
 	mountOptions.allowOthers = cmdMount.Flag.Bool("allowOthers", true, "allows other users to access the file system")
 	mountOptions.umaskString = cmdMount.Flag.String("umask", "022", "octal umask, e.g., 022, 0111")
@@ -48,7 +49,6 @@ func init() {
 	mountCpuProfile = cmdMount.Flag.String("cpuprofile", "", "cpu profile output file")
 	mountMemProfile = cmdMount.Flag.String("memprofile", "", "memory profile output file")
 	mountOptions.outsideContainerClusterMode = cmdMount.Flag.Bool("outsideContainerClusterMode", false, "allows other users to access the file system")
-	mountOptions.asyncMetaDataCaching = cmdMount.Flag.Bool("asyncMetaDataCaching", true, "async meta data caching. this feature will be permanent and this option will be removed.")
 }
 
 var cmdMount = &Command{

@@ -14,7 +14,7 @@ import (
 
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
-	"github.com/chrislusf/seaweedfs/weed/server"
+	weed_server "github.com/chrislusf/seaweedfs/weed/server"
 	"github.com/chrislusf/seaweedfs/weed/util"
 )
 
@@ -105,11 +105,11 @@ func (s3a *S3ApiServer) DeleteObjectHandler(w http.ResponseWriter, r *http.Reque
 	bucket := vars["bucket"]
 	object := getObject(vars)
 
-	destUrl := fmt.Sprintf("http://%s%s/%s%s",
+	destUrl := fmt.Sprintf("http://%s%s/%s%s?recursive=true",
 		s3a.option.Filer, s3a.option.BucketsPath, bucket, object)
 
-	s3a.proxyToFiler(w, r, destUrl, func(proxyResonse *http.Response, w http.ResponseWriter) {
-		for k, v := range proxyResonse.Header {
+	s3a.proxyToFiler(w, r, destUrl, func(proxyResponse *http.Response, w http.ResponseWriter) {
+		for k, v := range proxyResponse.Header {
 			w.Header()[k] = v
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -204,7 +204,7 @@ func (s3a *S3ApiServer) DeleteMultipleObjectsHandler(w http.ResponseWriter, r *h
 
 }
 
-func (s3a *S3ApiServer) proxyToFiler(w http.ResponseWriter, r *http.Request, destUrl string, responseFn func(proxyResonse *http.Response, w http.ResponseWriter)) {
+func (s3a *S3ApiServer) proxyToFiler(w http.ResponseWriter, r *http.Request, destUrl string, responseFn func(proxyResponse *http.Response, w http.ResponseWriter)) {
 
 	glog.V(2).Infof("s3 proxying %s to %s", r.Method, destUrl)
 
@@ -237,12 +237,12 @@ func (s3a *S3ApiServer) proxyToFiler(w http.ResponseWriter, r *http.Request, des
 	responseFn(resp, w)
 
 }
-func passThroughResponse(proxyResonse *http.Response, w http.ResponseWriter) {
-	for k, v := range proxyResonse.Header {
+func passThroughResponse(proxyResponse *http.Response, w http.ResponseWriter) {
+	for k, v := range proxyResponse.Header {
 		w.Header()[k] = v
 	}
-	w.WriteHeader(proxyResonse.StatusCode)
-	io.Copy(w, proxyResonse.Body)
+	w.WriteHeader(proxyResponse.StatusCode)
+	io.Copy(w, proxyResponse.Body)
 }
 
 func (s3a *S3ApiServer) putToFiler(r *http.Request, uploadUrl string, dataReader io.Reader) (etag string, code ErrorCode) {

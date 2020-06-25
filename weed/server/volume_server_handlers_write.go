@@ -42,7 +42,7 @@ func (vs *VolumeServer) PostHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reqNeedle, originalSize, ne := needle.CreateNeedleFromRequest(r, vs.FixJpgOrientation, vs.fileSizeLimitBytes)
+	reqNeedle, originalSize, ne := needle.CreateNeedleFromRequest(r, vs.fileSizeLimitBytes)
 	if ne != nil {
 		writeJsonError(w, r, http.StatusBadRequest, ne)
 		return
@@ -120,7 +120,7 @@ func (vs *VolumeServer) DeleteHandler(w http.ResponseWriter, r *http.Request) {
 	count := int64(n.Size)
 
 	if n.IsChunkedManifest() {
-		chunkManifest, e := operation.LoadChunkManifest(n.Data, n.IsGzipped())
+		chunkManifest, e := operation.LoadChunkManifest(n.Data, n.IsCompressed())
 		if e != nil {
 			writeJsonError(w, r, http.StatusInternalServerError, fmt.Errorf("Load chunks manifest error: %v", e))
 			return

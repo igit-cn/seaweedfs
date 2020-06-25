@@ -30,7 +30,7 @@ func init() {
 }
 
 var cmdServer = &Command{
-	UsageLine: "server -port=8080 -dir=/tmp -volume.max=5 -ip=server_name",
+	UsageLine: "server -dir=/tmp -volume.max=5 -ip=server_name",
 	Short:     "start a master server, a volume server, and optionally a filer and a S3 gateway",
 	Long: `start both a volume server to provide storage spaces
   and a master server to provide volume=>location mapping service and sequence number of file ids
@@ -54,8 +54,8 @@ var (
 	serverWhiteListOption     = cmdServer.Flag.String("whiteList", "", "comma separated Ip addresses having write permission. No limit if empty.")
 	serverDisableHttp         = cmdServer.Flag.Bool("disableHttp", false, "disable http requests, only gRPC operations are allowed.")
 	volumeDataFolders         = cmdServer.Flag.String("dir", os.TempDir(), "directories to store data files. dir[,dir]...")
-	volumeMaxDataVolumeCounts = cmdServer.Flag.String("volume.max", "7", "maximum numbers of volumes, count[,count]... If set to zero on non-windows OS, the limit will be auto configured.")
-	volumeMinFreeSpacePercent = cmdServer.Flag.String("volume.minFreeSpacePercent", "0", "minimum free disk space(in percents). If free disk space lower this value - all volumes marks as ReadOnly")
+	volumeMaxDataVolumeCounts = cmdServer.Flag.String("volume.max", "7", "maximum numbers of volumes, count[,count]... If set to zero, the limit will be auto configured.")
+	volumeMinFreeSpacePercent = cmdServer.Flag.String("volume.minFreeSpacePercent", "0", "minimum free disk space(in percents). Low disk space will mark all volumes as ReadOnly.")
 
 	// pulseSeconds              = cmdServer.Flag.Int("pulseSeconds", 5, "number of seconds between heartbeats")
 	isStartingFiler           = cmdServer.Flag.Bool("filer", false, "whether to start filer")
@@ -63,6 +63,8 @@ var (
 	isStartingMsgBroker       = cmdServer.Flag.Bool("msgBroker", false, "whether to start message broker")
 
 	serverWhiteList []string
+
+	False = false
 )
 
 func init() {
@@ -90,11 +92,11 @@ func init() {
 	serverOptions.v.port = cmdServer.Flag.Int("volume.port", 8080, "volume server http listen port")
 	serverOptions.v.publicPort = cmdServer.Flag.Int("volume.port.public", 0, "volume server public port")
 	serverOptions.v.indexType = cmdServer.Flag.String("volume.index", "memory", "Choose [memory|leveldb|leveldbMedium|leveldbLarge] mode for memory~performance balance.")
-	serverOptions.v.fixJpgOrientation = cmdServer.Flag.Bool("volume.images.fix.orientation", false, "Adjust jpg orientation when uploading.")
 	serverOptions.v.readRedirect = cmdServer.Flag.Bool("volume.read.redirect", true, "Redirect moved or non-local volumes.")
 	serverOptions.v.compactionMBPerSecond = cmdServer.Flag.Int("volume.compactionMBps", 0, "limit compaction speed in mega bytes per second")
 	serverOptions.v.fileSizeLimitMB = cmdServer.Flag.Int("volume.fileSizeLimitMB", 256, "limit file size to avoid out of memory")
 	serverOptions.v.publicUrl = cmdServer.Flag.String("volume.publicUrl", "", "publicly accessible address")
+	serverOptions.v.pprof = &False
 
 	s3Options.port = cmdServer.Flag.Int("s3.port", 8333, "s3 server http listen port")
 	s3Options.domainName = cmdServer.Flag.String("s3.domainName", "", "suffix of the host name, {bucket}.{domainName}")
