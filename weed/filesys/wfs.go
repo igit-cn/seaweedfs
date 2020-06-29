@@ -66,6 +66,7 @@ type WFS struct {
 	stats statsCache
 
 	root        fs.Node
+	fsNodeCache *FsCache
 
 	chunkCache *chunk_cache.ChunkCache
 	metaCache  *meta_cache.MetaCache
@@ -92,6 +93,7 @@ func NewSeaweedFileSystem(option *Option) *WFS {
 			wfs.chunkCache.Shutdown()
 		})
 	}
+
 	wfs.metaCache = meta_cache.NewMetaCache(path.Join(option.CacheDir, "meta"))
 	startTime := time.Now()
 	if err := meta_cache.InitMetaCache(wfs.metaCache, wfs, wfs.option.FilerMountRootPath); err != nil {
@@ -104,6 +106,7 @@ func NewSeaweedFileSystem(option *Option) *WFS {
 	}
 
 	wfs.root = &Dir{name: wfs.option.FilerMountRootPath, wfs: wfs}
+	wfs.fsNodeCache = newFsCache(wfs.root)
 
 	return wfs
 }

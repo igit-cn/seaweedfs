@@ -7,13 +7,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/seaweedfs/fuse"
+	"github.com/seaweedfs/fuse/fs"
+
 	"github.com/chrislusf/seaweedfs/weed/filer2"
 	"github.com/chrislusf/seaweedfs/weed/filesys/meta_cache"
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
 	"github.com/chrislusf/seaweedfs/weed/util"
-	"github.com/seaweedfs/fuse"
-	"github.com/seaweedfs/fuse/fs"
 )
 
 type Dir struct {
@@ -90,18 +91,22 @@ func (dir *Dir) setRootDirAttributes(attr *fuse.Attr) {
 }
 
 func (dir *Dir) newFile(name string, entry *filer_pb.Entry) fs.Node {
-	return &File{
-		Name:           name,
-		dir:            dir,
-		wfs:            dir.wfs,
-		entry:          entry,
-		entryViewCache: nil,
-	}
+	return dir.wfs.fsNodeCache.EnsureFsNode(util.NewFullPath(dir.FullPath(), name), func() fs.Node {
+		return &File{
+			Name:           name,
+			dir:            dir,
+			wfs:            dir.wfs,
+			entry:          entry,
+			entryViewCache: nil,
+		}
+	})
 }
 
 func (dir *Dir) newDirectory(fullpath util.FullPath, entry *filer_pb.Entry) fs.Node {
 
-	return &Dir{name: entry.Name, wfs: dir.wfs, entry: entry, parent: dir}
+	return dir.wfs.fsNodeCache.EnsureFsNode(fullpath, func() fs.Node {
+		return &Dir{name: entry.Name, wfs: dir.wfs, entry: entry, parent: dir}
+	})
 
 }
 
@@ -205,9 +210,8 @@ func (dir *Dir) Lookup(ctx context.Context, req *fuse.LookupRequest, resp *fuse.
 
 	glog.V(4).Infof("dir Lookup %s: %s by %s", dir.FullPath(), req.Name, req.Header.String())
 
-	dirPath := dir.FullPath()
-	fullFilePath := util.NewFullPath(dirPath, req.Name)
-
+	fullFilePath := util.NewFullPath(dir.FullPath(), req.Name)
+	dirPath := util.FullPath(dir.FullPath())
 	meta_cache.EnsureVisited(dir.wfs.metaCache, dir.wfs, util.FullPath(dirPath))
 	cachedEntry, cacheErr := dir.wfs.metaCache.FindEntry(context.Background(), fullFilePath)
 	if cacheErr == filer_pb.ErrNotFound {
@@ -268,7 +272,7 @@ func (dir *Dir) ReadDirAll(ctx context.Context) (ret []fuse.Dirent, err error) {
 
 	dirPath := util.FullPath(dir.FullPath())
 	meta_cache.EnsureVisited(dir.wfs.metaCache, dir.wfs, dirPath)
-	listedEntries, listErr := dir.wfs.metaCache.ListDirectoryEntries(context.Background(), dirPath, "", false, int(dir.wfs.option.DirListCacheLimit))
+	listedEntries, listErr := dir.wfs.metaCache.ListDirectoryEntries(context.Background(), util.FullPath(dir.FullPath()), "", false, int(dir.wfs.option.DirListCacheLimit))
 	if listErr != nil {
 		glog.Errorf("list meta cache: %v", listErr)
 		return nil, fuse.EIO
@@ -277,7 +281,6 @@ func (dir *Dir) ReadDirAll(ctx context.Context) (ret []fuse.Dirent, err error) {
 		processEachEntryFn(cachedEntry.ToProtoEntry(), false)
 	}
 	return
-
 }
 
 func (dir *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
@@ -303,6 +306,8 @@ func (dir *Dir) removeOneFile(req *fuse.RemoveRequest) error {
 
 	dir.wfs.deleteFileChunks(entry.Chunks)
 
+	dir.wfs.fsNodeCache.DeleteFsNode(filePath)
+
 	dir.wfs.metaCache.DeleteEntry(context.Background(), filePath)
 
 	glog.V(3).Infof("remove file: %v", req)
@@ -319,6 +324,7 @@ func (dir *Dir) removeOneFile(req *fuse.RemoveRequest) error {
 func (dir *Dir) removeFolder(req *fuse.RemoveRequest) error {
 
 	t := util.NewFullPath(dir.FullPath(), req.Name)
+	dir.wfs.fsNodeCache.DeleteFsNode(t)
 
 	dir.wfs.metaCache.DeleteEntry(context.Background(), t)
 
@@ -411,6 +417,8 @@ func (dir *Dir) Listxattr(ctx context.Context, req *fuse.ListxattrRequest, resp 
 
 func (dir *Dir) Forget() {
 	glog.V(3).Infof("Forget dir %s", dir.FullPath())
+
+	dir.wfs.fsNodeCache.DeleteFsNode(util.FullPath(dir.FullPath()))
 }
 
 func (dir *Dir) maybeLoadEntry() error {

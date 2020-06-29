@@ -120,5 +120,4 @@ func (wfs *WFS) maybeLoadEntry(dir, name string) (entry *filer_pb.Entry, err err
 		return nil, fuse.ENOENT
 	}
 	return cachedEntry.ToProtoEntry(), nil
-
 }

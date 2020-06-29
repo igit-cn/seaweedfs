@@ -90,6 +90,9 @@ func (c *ChunkReadAt) doReadAt(p []byte, offset int64) (n int, err error) {
 			found = true
 			if c.bufferOffset != chunk.LogicOffset {
 				c.buffer, err = c.fetchChunkData(chunk)
+				if err != nil {
+					glog.Errorf("fetching chunk %+v: %v\n", chunk, err)
+				}
 				c.bufferOffset = chunk.LogicOffset
 			}
 			break
@@ -99,7 +102,9 @@ func (c *ChunkReadAt) doReadAt(p []byte, offset int64) (n int, err error) {
 		return 0, io.EOF
 	}
 
-	n = copy(p, c.buffer[offset-c.bufferOffset:])
+	if err == nil {
+		n = copy(p, c.buffer[offset-c.bufferOffset:])
+	}
 
 	// fmt.Printf("> doReadAt [%d,%d), buffer:[%d,%d)\n", offset, offset+int64(n), c.bufferOffset, c.bufferOffset+int64(len(c.buffer)))
 
@@ -109,7 +114,7 @@ func (c *ChunkReadAt) doReadAt(p []byte, offset int64) (n int, err error) {
 
 func (c *ChunkReadAt) fetchChunkData(chunkView *ChunkView) (data []byte, err error) {
 
-	// fmt.Printf("fetching %s [%d,%d)\n", chunkView.FileId, chunkView.LogicOffset, chunkView.LogicOffset+int64(chunkView.Size))
+	glog.V(4).Infof("fetchChunkData %s [%d,%d)\n", chunkView.FileId, chunkView.LogicOffset, chunkView.LogicOffset+int64(chunkView.Size))
 
 	hasDataInCache := false
 	chunkData := c.chunkCache.GetChunk(chunkView.FileId, chunkView.ChunkSize)
@@ -124,7 +129,8 @@ func (c *ChunkReadAt) fetchChunkData(chunkView *ChunkView) (data []byte, err err
 	}
 
 	if int64(len(chunkData)) < chunkView.Offset+int64(chunkView.Size) {
-		return nil, fmt.Errorf("unexpected larger chunkView [%d,%d) than chunk %d", chunkView.Offset, chunkView.Offset+int64(chunkView.Size), len(chunkData))
+		glog.Errorf("unexpected larger cached:%v chunk %s [%d,%d) than %d", hasDataInCache, chunkView.FileId, chunkView.Offset, chunkView.Offset+int64(chunkView.Size), len(chunkData))
+		return nil, fmt.Errorf("unexpected larger cached:%v chunk %s [%d,%d) than %d", hasDataInCache, chunkView.FileId, chunkView.Offset, chunkView.Offset+int64(chunkView.Size), len(chunkData))
 	}
 
 	data = chunkData[chunkView.Offset : chunkView.Offset+int64(chunkView.Size)]
@@ -148,7 +154,7 @@ func (c *ChunkReadAt) doFetchFullChunkData(fileId string, cipherKey []byte, isGz
 		buffer.Write(data)
 	})
 	if err != nil {
-		glog.V(1).Infof("read %s failed, err: %v", fileId, err)
+		glog.V(0).Infof("read %s failed, err: %v", fileId, err)
 		return nil, err
 	}
 
