@@ -25,6 +25,7 @@ type VolumeServer struct {
 	grpcDialOption  grpc.DialOption
 
 	needleMapKind           storage.NeedleMapType
+	FixJpgOrientation       bool
 	ReadRedirect            bool
 	compactionBytePerSecond int64
 	MetricsAddress          string
@@ -34,11 +35,12 @@ type VolumeServer struct {
 
 func NewVolumeServer(adminMux, publicMux *http.ServeMux, ip string,
 	port int, publicUrl string,
-	folders []string, maxCounts []int, minFreeSpacePercent []float32,
+	folders []string, maxCounts []int, minFreeSpacePercents []float32,
 	needleMapKind storage.NeedleMapType,
 	masterNodes []string, pulseSeconds int,
 	dataCenter string, rack string,
 	whiteList []string,
+	fixJpgOrientation bool,
 	readRedirect bool,
 	compactionMBPerSecond int,
 	fileSizeLimitMB int,
@@ -59,13 +61,14 @@ func NewVolumeServer(adminMux, publicMux *http.ServeMux, ip string,
 		dataCenter:              dataCenter,
 		rack:                    rack,
 		needleMapKind:           needleMapKind,
+		FixJpgOrientation:       fixJpgOrientation,
 		ReadRedirect:            readRedirect,
 		grpcDialOption:          security.LoadClientTLS(util.GetViper(), "grpc.volume"),
 		compactionBytePerSecond: int64(compactionMBPerSecond) * 1024 * 1024,
 		fileSizeLimitBytes:      int64(fileSizeLimitMB) * 1024 * 1024,
 	}
 	vs.SeedMasterNodes = masterNodes
-	vs.store = storage.NewStore(vs.grpcDialOption, port, ip, publicUrl, folders, maxCounts, minFreeSpacePercent, vs.needleMapKind)
+	vs.store = storage.NewStore(vs.grpcDialOption, port, ip, publicUrl, folders, maxCounts, minFreeSpacePercents, vs.needleMapKind)
 	vs.guard = security.NewGuard(whiteList, signingKey, expiresAfterSec, readSigningKey, readExpiresAfterSec)
 
 	handleStaticResources(adminMux)

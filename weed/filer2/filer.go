@@ -26,7 +26,7 @@ var (
 )
 
 type Filer struct {
-	store               *FilerStoreWrapper
+	Store               *FilerStoreWrapper
 	directoryCache      *ccache.Cache
 	MasterClient        *wdclient.MasterClient
 	fileIdDeletionQueue *util.UnboundedQueue
@@ -35,19 +35,21 @@ type Filer struct {
 	FsyncBuckets        []string
 	buckets             *FilerBuckets
 	Cipher              bool
-	MetaLogBuffer       *log_buffer.LogBuffer
+	LocalMetaLogBuffer  *log_buffer.LogBuffer
 	metaLogCollection   string
 	metaLogReplication  string
+	MetaAggregator      *MetaAggregator
 }
 
-func NewFiler(masters []string, grpcDialOption grpc.DialOption, filerHost string, filerGrpcPort uint32, collection string, replication string, notifyFn func()) *Filer {
+func NewFiler(masters []string, grpcDialOption grpc.DialOption,
+	filerHost string, filerGrpcPort uint32, collection string, replication string, notifyFn func()) *Filer {
 	f := &Filer{
 		directoryCache:      ccache.New(ccache.Configure().MaxSize(1000).ItemsToPrune(100)),
 		MasterClient:        wdclient.NewMasterClient(grpcDialOption, "filer", filerHost, filerGrpcPort, masters),
 		fileIdDeletionQueue: util.NewUnboundedQueue(),
 		GrpcDialOption:      grpcDialOption,
 	}
-	f.MetaLogBuffer = log_buffer.NewLogBuffer(time.Minute, f.logFlushFunc, notifyFn)
+	f.LocalMetaLogBuffer = log_buffer.NewLogBuffer(time.Minute, f.logFlushFunc, notifyFn)
 	f.metaLogCollection = collection
 	f.metaLogReplication = replication
 
@@ -56,8 +58,23 @@ func NewFiler(masters []string, grpcDialOption grpc.DialOption, filerHost string
 	return f
 }
 
+func (f *Filer) AggregateFromPeers(self string, filers []string) {
+
+	// set peers
+	if len(filers) == 0 {
+		filers = append(filers, self)
+	}
+	f.MetaAggregator = NewMetaAggregator(filers, f.GrpcDialOption)
+	f.MetaAggregator.StartLoopSubscribe(f, self)
+
+}
+
 func (f *Filer) SetStore(store FilerStore) {
-	f.store = NewFilerStoreWrapper(store)
+	f.Store = NewFilerStoreWrapper(store)
+}
+
+func (f *Filer) GetStore() (store FilerStore) {
+	return f.Store
 }
 
 func (f *Filer) DisableDirectoryCache() {
@@ -73,18 +90,18 @@ func (fs *Filer) KeepConnectedToMaster() {
 }
 
 func (f *Filer) BeginTransaction(ctx context.Context) (context.Context, error) {
-	return f.store.BeginTransaction(ctx)
+	return f.Store.BeginTransaction(ctx)
 }
 
 func (f *Filer) CommitTransaction(ctx context.Context) error {
-	return f.store.CommitTransaction(ctx)
+	return f.Store.CommitTransaction(ctx)
 }
 
 func (f *Filer) RollbackTransaction(ctx context.Context) error {
-	return f.store.RollbackTransaction(ctx)
+	return f.Store.RollbackTransaction(ctx)
 }
 
-func (f *Filer) CreateEntry(ctx context.Context, entry *Entry, o_excl bool) error {
+func (f *Filer) CreateEntry(ctx context.Context, entry *Entry, o_excl bool, isFromOtherCluster bool) error {
 
 	if string(entry.FullPath) == "/" {
 		return nil
@@ -133,7 +150,7 @@ func (f *Filer) CreateEntry(ctx context.Context, entry *Entry, o_excl bool) erro
 			}
 
 			glog.V(2).Infof("create directory: %s %v", dirPath, dirEntry.Mode)
-			mkdirErr := f.store.InsertEntry(ctx, dirEntry)
+			mkdirErr := f.Store.InsertEntry(ctx, dirEntry)
 			if mkdirErr != nil {
 				if _, err := f.FindEntry(ctx, util.FullPath(dirPath)); err == filer_pb.ErrNotFound {
 					glog.V(3).Infof("mkdir %s: %v", dirPath, mkdirErr)
@@ -141,7 +158,7 @@ func (f *Filer) CreateEntry(ctx context.Context, entry *Entry, o_excl bool) erro
 				}
 			} else {
 				f.maybeAddBucket(dirEntry)
-				f.NotifyUpdateEvent(ctx, nil, dirEntry, false)
+				f.NotifyUpdateEvent(ctx, nil, dirEntry, false, isFromOtherCluster)
 			}
 
 		} else if !dirEntry.IsDirectory() {
@@ -176,7 +193,7 @@ func (f *Filer) CreateEntry(ctx context.Context, entry *Entry, o_excl bool) erro
 
 	glog.V(4).Infof("CreateEntry %s: old entry: %v exclusive:%v", entry.FullPath, oldEntry, o_excl)
 	if oldEntry == nil {
-		if err := f.store.InsertEntry(ctx, entry); err != nil {
+		if err := f.Store.InsertEntry(ctx, entry); err != nil {
 			glog.Errorf("insert entry %s: %v", entry.FullPath, err)
 			return fmt.Errorf("insert entry %s: %v", entry.FullPath, err)
 		}
@@ -192,7 +209,7 @@ func (f *Filer) CreateEntry(ctx context.Context, entry *Entry, o_excl bool) erro
 	}
 
 	f.maybeAddBucket(entry)
-	f.NotifyUpdateEvent(ctx, oldEntry, entry, true)
+	f.NotifyUpdateEvent(ctx, oldEntry, entry, true, isFromOtherCluster)
 
 	f.deleteChunksIfNotNew(oldEntry, entry)
 
@@ -212,7 +229,7 @@ func (f *Filer) UpdateEntry(ctx context.Context, oldEntry, entry *Entry) (err er
 			return fmt.Errorf("existing %s is a file", entry.FullPath)
 		}
 	}
-	return f.store.UpdateEntry(ctx, entry)
+	return f.Store.UpdateEntry(ctx, entry)
 }
 
 func (f *Filer) FindEntry(ctx context.Context, p util.FullPath) (entry *Entry, err error) {
@@ -231,10 +248,10 @@ func (f *Filer) FindEntry(ctx context.Context, p util.FullPath) (entry *Entry, e
 			},
 		}, nil
 	}
-	entry, err = f.store.FindEntry(ctx, p)
+	entry, err = f.Store.FindEntry(ctx, p)
 	if entry != nil && entry.TtlSec > 0 {
 		if entry.Crtime.Add(time.Duration(entry.TtlSec) * time.Second).Before(time.Now()) {
-			f.store.DeleteEntry(ctx, p.Child(entry.Name()))
+			f.Store.DeleteEntry(ctx, p.Child(entry.Name()))
 			return nil, filer_pb.ErrNotFound
 		}
 	}
@@ -260,7 +277,7 @@ func (f *Filer) ListDirectoryEntries(ctx context.Context, p util.FullPath, start
 }
 
 func (f *Filer) doListDirectoryEntries(ctx context.Context, p util.FullPath, startFileName string, inclusive bool, limit int) (entries []*Entry, expiredCount int, lastFileName string, err error) {
-	listedEntries, listErr := f.store.ListDirectoryEntries(ctx, p, startFileName, inclusive, limit)
+	listedEntries, listErr := f.Store.ListDirectoryEntries(ctx, p, startFileName, inclusive, limit)
 	if listErr != nil {
 		return listedEntries, expiredCount, "", listErr
 	}
@@ -268,7 +285,7 @@ func (f *Filer) doListDirectoryEntries(ctx context.Context, p util.FullPath, sta
 		lastFileName = entry.Name()
 		if entry.TtlSec > 0 {
 			if entry.Crtime.Add(time.Duration(entry.TtlSec) * time.Second).Before(time.Now()) {
-				f.store.DeleteEntry(ctx, p.Child(entry.Name()))
+				f.Store.DeleteEntry(ctx, p.Child(entry.Name()))
 				expiredCount++
 				continue
 			}
@@ -318,6 +335,6 @@ func (f *Filer) cacheSetDirectory(dirpath string, dirEntry *Entry, level int) {
 }
 
 func (f *Filer) Shutdown() {
-	f.MetaLogBuffer.Shutdown()
-	f.store.Shutdown()
+	f.LocalMetaLogBuffer.Shutdown()
+	f.Store.Shutdown()
 }

@@ -6,7 +6,6 @@ import (
 	"math"
 	"os"
 	"path"
-	"strings"
 	"sync"
 	"time"
 
@@ -19,7 +18,6 @@ import (
 
 	"github.com/chrislusf/seaweedfs/weed/filesys/meta_cache"
 	"github.com/chrislusf/seaweedfs/weed/glog"
-	"github.com/chrislusf/seaweedfs/weed/pb"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
 	"github.com/chrislusf/seaweedfs/weed/util"
 	"github.com/chrislusf/seaweedfs/weed/util/chunk_cache"
@@ -55,7 +53,7 @@ var _ = fs.FS(&WFS{})
 var _ = fs.FSStatfser(&WFS{})
 
 type WFS struct {
-	option                    *Option
+	option *Option
 
 	// contains all open handles, protected by handlesLock
 	handlesLock sync.Mutex
@@ -78,32 +76,30 @@ type statsCache struct {
 
 func NewSeaweedFileSystem(option *Option) *WFS {
 	wfs := &WFS{
-		option:                    option,
-		handles:                   make(map[uint64]*FileHandle),
+		option:  option,
+		handles: make(map[uint64]*FileHandle),
 		bufPool: sync.Pool{
 			New: func() interface{} {
 				return make([]byte, option.ChunkSizeLimit)
 			},
 		},
 	}
+	cacheUniqueId := util.Md5([]byte(option.FilerGrpcAddress + option.FilerMountRootPath + util.Version()))[0:4]
+	cacheDir := path.Join(option.CacheDir, cacheUniqueId)
 	if option.CacheSizeMB > 0 {
-		os.MkdirAll(option.CacheDir, 0755)
-		wfs.chunkCache = chunk_cache.NewChunkCache(256, option.CacheDir, option.CacheSizeMB)
+		os.MkdirAll(cacheDir, 0755)
+		wfs.chunkCache = chunk_cache.NewChunkCache(256, cacheDir, option.CacheSizeMB)
 		grace.OnInterrupt(func() {
 			wfs.chunkCache.Shutdown()
 		})
 	}
 
-	wfs.metaCache = meta_cache.NewMetaCache(path.Join(option.CacheDir, "meta"))
+	wfs.metaCache = meta_cache.NewMetaCache(path.Join(cacheDir, "meta"))
 	startTime := time.Now()
-	if err := meta_cache.InitMetaCache(wfs.metaCache, wfs, wfs.option.FilerMountRootPath); err != nil {
-		glog.V(0).Infof("failed to init meta cache: %v", err)
-	} else {
-		go meta_cache.SubscribeMetaEvents(wfs.metaCache, wfs, wfs.option.FilerMountRootPath, startTime.UnixNano())
-		grace.OnInterrupt(func() {
-			wfs.metaCache.Shutdown()
-		})
-	}
+	go meta_cache.SubscribeMetaEvents(wfs.metaCache, wfs, wfs.option.FilerMountRootPath, startTime.UnixNano())
+	grace.OnInterrupt(func() {
+		wfs.metaCache.Shutdown()
+	})
 
 	wfs.root = &Dir{name: wfs.option.FilerMountRootPath, wfs: wfs}
 	wfs.fsNodeCache = newFsCache(wfs.root)
@@ -113,22 +109,6 @@ func NewSeaweedFileSystem(option *Option) *WFS {
 
 func (wfs *WFS) Root() (fs.Node, error) {
 	return wfs.root, nil
-}
-
-var _ = filer_pb.FilerClient(&WFS{})
-
-func (wfs *WFS) WithFilerClient(fn func(filer_pb.SeaweedFilerClient) error) error {
-
-	err := pb.WithCachedGrpcClient(func(grpcConnection *grpc.ClientConn) error {
-		client := filer_pb.NewSeaweedFilerClient(grpcConnection)
-		return fn(client)
-	}, wfs.option.FilerGrpcAddress, wfs.option.GrpcDialOption)
-
-	if err == nil {
-		return nil
-	}
-	return err
-
 }
 
 func (wfs *WFS) AcquireHandle(file *File, uid, gid uint32) (fileHandle *FileHandle) {
@@ -224,17 +204,4 @@ func (wfs *WFS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.
 	resp.Frsize = uint32(blockSize)
 
 	return nil
-}
-
-func (wfs *WFS) AdjustedUrl(hostAndPort string) string {
-	if !wfs.option.OutsideContainerClusterMode {
-		return hostAndPort
-	}
-	commaIndex := strings.Index(hostAndPort, ":")
-	if commaIndex < 0 {
-		return hostAndPort
-	}
-	filerCommaIndex := strings.Index(wfs.option.FilerGrpcAddress, ":")
-	return fmt.Sprintf("%s:%s", wfs.option.FilerGrpcAddress[:filerCommaIndex], hostAndPort[commaIndex+1:])
-
 }

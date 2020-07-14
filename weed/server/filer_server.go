@@ -52,6 +52,7 @@ type FilerOption struct {
 	Port               uint32
 	recursiveDelete    bool
 	Cipher             bool
+	Filers             []string
 }
 
 type FilerServer struct {
@@ -81,7 +82,9 @@ func NewFilerServer(defaultMux, readonlyMux *http.ServeMux, option *FilerOption)
 		glog.Fatal("master list is required!")
 	}
 
-	fs.filer = filer2.NewFiler(option.Masters, fs.grpcDialOption, option.Host, option.Port, option.Collection, option.DefaultReplication, fs.notifyMetaListeners)
+	fs.filer = filer2.NewFiler(option.Masters, fs.grpcDialOption, option.Host, option.Port, option.Collection, option.DefaultReplication, func() {
+		fs.listenersCond.Broadcast()
+	})
 	fs.filer.Cipher = option.Cipher
 
 	maybeStartMetrics(fs, option)
@@ -96,6 +99,7 @@ func NewFilerServer(defaultMux, readonlyMux *http.ServeMux, option *FilerOption)
 		if os.IsNotExist(err) {
 			os.MkdirAll(option.DefaultLevelDbDir, 0755)
 		}
+		glog.V(0).Infof("default to create filer store dir in %s", option.DefaultLevelDbDir)
 	}
 	util.LoadConfiguration("notification", false)
 
@@ -114,6 +118,8 @@ func NewFilerServer(defaultMux, readonlyMux *http.ServeMux, option *FilerOption)
 	if defaultMux != readonlyMux {
 		readonlyMux.HandleFunc("/", fs.readonlyFilerHandler)
 	}
+
+	fs.filer.AggregateFromPeers(fmt.Sprintf("%s:%d", option.Host, option.Port), option.Filers)
 
 	fs.filer.LoadBuckets()
 

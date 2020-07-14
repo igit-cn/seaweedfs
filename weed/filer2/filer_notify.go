@@ -15,7 +15,7 @@ import (
 	"github.com/chrislusf/seaweedfs/weed/util"
 )
 
-func (f *Filer) NotifyUpdateEvent(ctx context.Context, oldEntry, newEntry *Entry, deleteChunks bool) {
+func (f *Filer) NotifyUpdateEvent(ctx context.Context, oldEntry, newEntry *Entry, deleteChunks, isFromOtherCluster bool) {
 	var fullpath string
 	if oldEntry != nil {
 		fullpath = string(oldEntry.FullPath)
@@ -36,10 +36,11 @@ func (f *Filer) NotifyUpdateEvent(ctx context.Context, oldEntry, newEntry *Entry
 		newParentPath, _ = newEntry.FullPath.DirAndName()
 	}
 	eventNotification := &filer_pb.EventNotification{
-		OldEntry:      oldEntry.ToProtoEntry(),
-		NewEntry:      newEntry.ToProtoEntry(),
-		DeleteChunks:  deleteChunks,
-		NewParentPath: newParentPath,
+		OldEntry:           oldEntry.ToProtoEntry(),
+		NewEntry:           newEntry.ToProtoEntry(),
+		DeleteChunks:       deleteChunks,
+		NewParentPath:      newParentPath,
+		IsFromOtherCluster: isFromOtherCluster,
 	}
 
 	if notification.Queue != nil {
@@ -66,7 +67,7 @@ func (f *Filer) logMetaEvent(ctx context.Context, fullpath string, eventNotifica
 		return
 	}
 
-	f.MetaLogBuffer.AddToBuffer([]byte(dir), data)
+	f.LocalMetaLogBuffer.AddToBuffer([]byte(dir), data)
 
 }
 
@@ -82,7 +83,7 @@ func (f *Filer) logFlushFunc(startTime, stopTime time.Time, buf []byte) {
 	}
 }
 
-func (f *Filer) ReadPersistedLogBuffer(startTime time.Time, eachLogEntryFn func(logEntry *filer_pb.LogEntry) error) error {
+func (f *Filer) ReadPersistedLogBuffer(startTime time.Time, eachLogEntryFn func(logEntry *filer_pb.LogEntry) error) (lastTsNs int64, err error) {
 
 	startDate := fmt.Sprintf("%04d-%02d-%02d", startTime.Year(), startTime.Month(), startTime.Day())
 	startHourMinute := fmt.Sprintf("%02d-%02d.segment", startTime.Hour(), startTime.Minute())
@@ -92,13 +93,13 @@ func (f *Filer) ReadPersistedLogBuffer(startTime time.Time, eachLogEntryFn func(
 
 	dayEntries, listDayErr := f.ListDirectoryEntries(context.Background(), SystemLogDir, startDate, true, 366)
 	if listDayErr != nil {
-		return fmt.Errorf("fail to list log by day: %v", listDayErr)
+		return lastTsNs, fmt.Errorf("fail to list log by day: %v", listDayErr)
 	}
 	for _, dayEntry := range dayEntries {
 		// println("checking day", dayEntry.FullPath)
 		hourMinuteEntries, listHourMinuteErr := f.ListDirectoryEntries(context.Background(), util.NewFullPath(SystemLogDir, dayEntry.Name()), "", false, 24*60)
 		if listHourMinuteErr != nil {
-			return fmt.Errorf("fail to list log %s by day: %v", dayEntry.Name(), listHourMinuteErr)
+			return lastTsNs, fmt.Errorf("fail to list log %s by day: %v", dayEntry.Name(), listHourMinuteErr)
 		}
 		for _, hourMinuteEntry := range hourMinuteEntries {
 			// println("checking hh-mm", hourMinuteEntry.FullPath)
@@ -109,49 +110,51 @@ func (f *Filer) ReadPersistedLogBuffer(startTime time.Time, eachLogEntryFn func(
 			}
 			// println("processing", hourMinuteEntry.FullPath)
 			chunkedFileReader := NewChunkStreamReaderFromFiler(f.MasterClient, hourMinuteEntry.Chunks)
-			if err := ReadEachLogEntry(chunkedFileReader, sizeBuf, startTsNs, eachLogEntryFn); err != nil {
+			if lastTsNs, err = ReadEachLogEntry(chunkedFileReader, sizeBuf, startTsNs, eachLogEntryFn); err != nil {
 				chunkedFileReader.Close()
 				if err == io.EOF {
 					break
 				}
-				return fmt.Errorf("reading %s: %v", hourMinuteEntry.FullPath, err)
+				return lastTsNs, fmt.Errorf("reading %s: %v", hourMinuteEntry.FullPath, err)
 			}
 			chunkedFileReader.Close()
 		}
 	}
 
-	return nil
+	return lastTsNs, nil
 }
 
-func ReadEachLogEntry(r io.Reader, sizeBuf []byte, ns int64, eachLogEntryFn func(logEntry *filer_pb.LogEntry) error) error {
+func ReadEachLogEntry(r io.Reader, sizeBuf []byte, ns int64, eachLogEntryFn func(logEntry *filer_pb.LogEntry) error) (lastTsNs int64, err error) {
 	for {
 		n, err := r.Read(sizeBuf)
 		if err != nil {
-			return err
+			return lastTsNs, err
 		}
 		if n != 4 {
-			return fmt.Errorf("size %d bytes, expected 4 bytes", n)
+			return lastTsNs, fmt.Errorf("size %d bytes, expected 4 bytes", n)
 		}
 		size := util.BytesToUint32(sizeBuf)
 		// println("entry size", size)
 		entryData := make([]byte, size)
 		n, err = r.Read(entryData)
 		if err != nil {
-			return err
+			return lastTsNs, err
 		}
 		if n != int(size) {
-			return fmt.Errorf("entry data %d bytes, expected %d bytes", n, size)
+			return lastTsNs, fmt.Errorf("entry data %d bytes, expected %d bytes", n, size)
 		}
 		logEntry := &filer_pb.LogEntry{}
 		if err = proto.Unmarshal(entryData, logEntry); err != nil {
-			return err
+			return lastTsNs, err
 		}
 		if logEntry.TsNs <= ns {
-			return nil
+			return lastTsNs, nil
 		}
 		// println("each log: ", logEntry.TsNs)
 		if err := eachLogEntryFn(logEntry); err != nil {
-			return err
+			return lastTsNs, err
+		} else {
+			lastTsNs = logEntry.TsNs
 		}
 	}
 }

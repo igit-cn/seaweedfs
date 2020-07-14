@@ -47,12 +47,13 @@ type VolumeServerOptions struct {
 	rack                  *string
 	whiteList             []string
 	indexType             *string
+	fixJpgOrientation     *bool
 	readRedirect          *bool
 	cpuProfile            *string
 	memProfile            *string
 	compactionMBPerSecond *int
 	fileSizeLimitMB       *int
-	minFreeSpacePercent   []float32
+	minFreeSpacePercents  []float32
 	pprof                 *bool
 	// pulseSeconds          *int
 }
@@ -70,6 +71,7 @@ func init() {
 	v.dataCenter = cmdVolume.Flag.String("dataCenter", "", "current volume server's data center name")
 	v.rack = cmdVolume.Flag.String("rack", "", "current volume server's rack name")
 	v.indexType = cmdVolume.Flag.String("index", "memory", "Choose [memory|leveldb|leveldbMedium|leveldbLarge] mode for memory~performance balance.")
+	v.fixJpgOrientation = cmdVolume.Flag.Bool("images.fix.orientation", false, "Adjust jpg orientation when uploading.")
 	v.readRedirect = cmdVolume.Flag.Bool("read.redirect", true, "Redirect moved or non-local volumes.")
 	v.cpuProfile = cmdVolume.Flag.String("cpuprofile", "", "cpu profile output file")
 	v.memProfile = cmdVolume.Flag.String("memprofile", "", "memory profile output file")
@@ -90,7 +92,7 @@ var (
 	volumeFolders         = cmdVolume.Flag.String("dir", os.TempDir(), "directories to store data files. dir[,dir]...")
 	maxVolumeCounts       = cmdVolume.Flag.String("max", "8", "maximum numbers of volumes, count[,count]... If set to zero, the limit will be auto configured.")
 	volumeWhiteListOption = cmdVolume.Flag.String("whiteList", "", "comma separated Ip addresses having write permission. No limit if empty.")
-	minFreeSpacePercent   = cmdVolume.Flag.String("minFreeSpacePercent", "0", "minimum free disk space(in percents). Low disk space will mark all volumes as ReadOnly.")
+	minFreeSpacePercent   = cmdVolume.Flag.String("minFreeSpacePercent", "1", "minimum free disk space (default to 1%). Low disk space will mark all volumes as ReadOnly.")
 )
 
 func runVolume(cmd *Command, args []string) bool {
@@ -137,18 +139,18 @@ func (v VolumeServerOptions) startVolumeServer(volumeFolders, maxVolumeCounts, v
 	minFreeSpacePercentStrings := strings.Split(minFreeSpacePercent, ",")
 	for _, freeString := range minFreeSpacePercentStrings {
 		if value, e := strconv.ParseFloat(freeString, 32); e == nil {
-			v.minFreeSpacePercent = append(v.minFreeSpacePercent, float32(value))
+			v.minFreeSpacePercents = append(v.minFreeSpacePercents, float32(value))
 		} else {
 			glog.Fatalf("The value specified in -minFreeSpacePercent not a valid value %s", freeString)
 		}
 	}
-	if len(v.minFreeSpacePercent) == 1 && len(v.folders) > 1 {
+	if len(v.minFreeSpacePercents) == 1 && len(v.folders) > 1 {
 		for i := 0; i < len(v.folders)-1; i++ {
-			v.minFreeSpacePercent = append(v.minFreeSpacePercent, v.minFreeSpacePercent[0])
+			v.minFreeSpacePercents = append(v.minFreeSpacePercents, v.minFreeSpacePercents[0])
 		}
 	}
-	if len(v.folders) != len(v.minFreeSpacePercent) {
-		glog.Fatalf("%d directories by -dir, but only %d minFreeSpacePercent is set by -minFreeSpacePercent", len(v.folders), len(v.minFreeSpacePercent))
+	if len(v.folders) != len(v.minFreeSpacePercents) {
+		glog.Fatalf("%d directories by -dir, but only %d minFreeSpacePercent is set by -minFreeSpacePercent", len(v.folders), len(v.minFreeSpacePercents))
 	}
 
 	// security related white list configuration
@@ -196,11 +198,11 @@ func (v VolumeServerOptions) startVolumeServer(volumeFolders, maxVolumeCounts, v
 
 	volumeServer := weed_server.NewVolumeServer(volumeMux, publicVolumeMux,
 		*v.ip, *v.port, *v.publicUrl,
-		v.folders, v.folderMaxLimits, v.minFreeSpacePercent,
+		v.folders, v.folderMaxLimits, v.minFreeSpacePercents,
 		volumeNeedleMapKind,
 		strings.Split(masters, ","), 5, *v.dataCenter, *v.rack,
 		v.whiteList,
-		*v.readRedirect,
+		*v.fixJpgOrientation, *v.readRedirect,
 		*v.compactionMBPerSecond,
 		*v.fileSizeLimitMB,
 	)

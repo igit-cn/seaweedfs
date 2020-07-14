@@ -4,7 +4,7 @@ global:
   registry: ""
   repository: ""
   imageName: chrislusf/seaweedfs
-  imageTag: "1.84"
+  imageTag: "1.85"
   imagePullPolicy: IfNotPresent
   imagePullSecrets: imagepullsecret
   restartPolicy: Always
@@ -122,6 +122,9 @@ volume:
 
   # Comma separated Ip addresses having write permission. No limit if empty.
   whiteList: null
+
+  # Adjust jpg orientation when uploading.
+  imagesFixOrientation: false
 
   extraVolumes: ""
   extraVolumeMounts: ""
