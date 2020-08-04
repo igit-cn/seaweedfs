@@ -39,7 +39,7 @@ func DecompressData(input []byte) ([]byte, error) {
 	if IsZstdContent(input) {
 		return unzstdData(input)
 	}
-	return nil, fmt.Errorf("unsupported compression")
+	return input, fmt.Errorf("unsupported compression")
 }
 
 func ungzipData(input []byte) ([]byte, error) {
@@ -54,6 +54,7 @@ func ungzipData(input []byte) ([]byte, error) {
 }
 
 var decoder, _ = zstd.NewReader(nil)
+
 func unzstdData(input []byte) ([]byte, error) {
 	return decoder.DecodeAll(input, nil)
 }

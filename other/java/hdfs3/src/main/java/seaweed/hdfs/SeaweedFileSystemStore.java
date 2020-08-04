@@ -1,5 +1,6 @@
 package seaweed.hdfs;
 
+import org.apache.hadoop.fs.FSInputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -61,7 +62,7 @@ public class SeaweedFileSystemStore {
         );
     }
 
-    public FileStatus[] listEntries(final Path path) {
+    public FileStatus[] listEntries(final Path path) throws IOException {
         LOG.debug("listEntries path: {}", path);
 
         FileStatus pathStatus = getFileStatus(path);
@@ -89,11 +90,11 @@ public class SeaweedFileSystemStore {
 
     }
 
-    public FileStatus getFileStatus(final Path path) {
+    public FileStatus getFileStatus(final Path path) throws IOException {
 
         FilerProto.Entry entry = lookupEntry(path);
         if (entry == null) {
-            return null;
+            throw new FileNotFoundException("File does not exist: " + path);
         }
         LOG.debug("doGetFileStatus path:{} entry:{}", path, entry);
 
@@ -136,7 +137,7 @@ public class SeaweedFileSystemStore {
             modification_time, access_time, permission, owner, group, null, path);
     }
 
-    private FilerProto.Entry lookupEntry(Path path) {
+    public FilerProto.Entry lookupEntry(Path path) {
 
         return filerClient.lookupEntry(getParentDirectory(path), path.getName());
 
@@ -207,12 +208,11 @@ public class SeaweedFileSystemStore {
 
     }
 
-    public InputStream openFileForRead(final Path path, FileSystem.Statistics statistics,
-                                       int bufferSize) throws IOException {
+    public FSInputStream openFileForRead(final Path path, FileSystem.Statistics statistics,
+                                         int bufferSize) throws IOException {
 
         LOG.debug("openFileForRead path:{} bufferSize:{}", path, bufferSize);
 
-        int readAheadQueueDepth = 2;
         FilerProto.Entry entry = lookupEntry(path);
 
         if (entry == null) {
@@ -223,8 +223,7 @@ public class SeaweedFileSystemStore {
             statistics,
             path.toUri().getPath(),
             entry,
-            bufferSize,
-            readAheadQueueDepth);
+            bufferSize);
     }
 
     public void setOwner(Path path, String owner, String group) {

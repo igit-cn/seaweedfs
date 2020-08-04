@@ -1,17 +1,16 @@
 package seaweedfs.client;
 
+import org.apache.http.Header;
+import org.apache.http.HeaderElement;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpHeaders;
-import org.apache.http.HttpResponse;
-import org.apache.http.client.HttpClient;
+import org.apache.http.client.entity.GzipDecompressingEntity;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpGet;
-import org.apache.http.impl.client.DefaultHttpClient;
 import org.apache.http.util.EntityUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.Closeable;
 import java.io.IOException;
 import java.util.*;
 
@@ -19,7 +18,7 @@ public class SeaweedRead {
 
     private static final Logger LOG = LoggerFactory.getLogger(SeaweedRead.class);
 
-    static ChunkCache chunkCache = new ChunkCache(1000);
+    static ChunkCache chunkCache = new ChunkCache(4);
 
     // returns bytesRead
     public static long read(FilerGrpcClient filerGrpcClient, List<VisibleInterval> visibleIntervals,
@@ -44,7 +43,8 @@ public class SeaweedRead {
         int startOffset = bufferOffset;
         for (ChunkView chunkView : chunkViews) {
             FilerProto.Locations locations = vid2Locations.get(parseVolumeId(chunkView.fileId));
-            if (locations.getLocationsCount() == 0) {
+            if (locations == null || locations.getLocationsCount() == 0) {
+                LOG.error("failed to locate {}", chunkView.fileId);
                 // log here!
                 return 0;
             }
@@ -65,6 +65,7 @@ public class SeaweedRead {
 
         if (chunkData == null) {
             chunkData = doFetchFullChunkData(chunkView, locations);
+            chunkCache.setChunk(chunkView.fileId, chunkData);
         }
 
         int len = (int) chunkView.size;
@@ -72,17 +73,15 @@ public class SeaweedRead {
                 chunkView.fileId, chunkData.length, chunkView.offset, buffer.length, startOffset, len);
         System.arraycopy(chunkData, (int) chunkView.offset, buffer, startOffset, len);
 
-        chunkCache.setChunk(chunkView.fileId, chunkData);
-
         return len;
     }
 
-    private static byte[] doFetchFullChunkData(ChunkView chunkView, FilerProto.Locations locations) throws IOException {
+    public static byte[] doFetchFullChunkData(ChunkView chunkView, FilerProto.Locations locations) throws IOException {
 
         HttpGet request = new HttpGet(
                 String.format("http://%s/%s", locations.getLocations(0).getUrl(), chunkView.fileId));
 
-        request.setHeader(HttpHeaders.ACCEPT_ENCODING, "");
+        request.setHeader(HttpHeaders.ACCEPT_ENCODING, "gzip");
 
         byte[] data = null;
 
@@ -90,6 +89,18 @@ public class SeaweedRead {
 
         try {
             HttpEntity entity = response.getEntity();
+
+            Header contentEncodingHeader = entity.getContentEncoding();
+
+            if (contentEncodingHeader != null) {
+                HeaderElement[] encodings =contentEncodingHeader.getElements();
+                for (int i = 0; i < encodings.length; i++) {
+                    if (encodings[i].getName().equalsIgnoreCase("gzip")) {
+                        entity = new GzipDecompressingEntity(entity);
+                        break;
+                    }
+                }
+            }
 
             data = EntityUtils.toByteArray(entity);
 
@@ -100,10 +111,6 @@ public class SeaweedRead {
             request.releaseConnection();
         }
 
-        if (chunkView.isCompressed) {
-            data = Gzip.decompress(data);
-        }
-
         if (chunkView.cipherKey != null && chunkView.cipherKey.length != 0) {
             try {
                 data = SeaweedCipher.decrypt(data, chunkView.cipherKey);
@@ -111,6 +118,12 @@ public class SeaweedRead {
                 throw new IOException("fail to decrypt", e);
             }
         }
+
+        if (chunkView.isCompressed) {
+            data = Gzip.decompress(data);
+        }
+
+        LOG.debug("doFetchFullChunkData fid:{} chunkData.length:{}", chunkView.fileId, data.length);
 
         return data;
 
@@ -138,7 +151,11 @@ public class SeaweedRead {
         return views;
     }
 
-    public static List<VisibleInterval> nonOverlappingVisibleIntervals(List<FilerProto.FileChunk> chunkList) {
+    public static List<VisibleInterval> nonOverlappingVisibleIntervals(
+            final FilerGrpcClient filerGrpcClient, List<FilerProto.FileChunk> chunkList) throws IOException {
+
+        chunkList = FileChunkManifest.resolveChunkManifest(filerGrpcClient, chunkList);
+
         FilerProto.FileChunk[] chunks = chunkList.toArray(new FilerProto.FileChunk[0]);
         Arrays.sort(chunks, new Comparator<FilerProto.FileChunk>() {
             @Override

@@ -11,8 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/mux"
-
 	"github.com/chrislusf/seaweedfs/weed/filer2"
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
@@ -23,10 +21,7 @@ func (s3a *S3ApiServer) ListObjectsV2Handler(w http.ResponseWriter, r *http.Requ
 	// https://docs.aws.amazon.com/AmazonS3/latest/API/v2-RESTBucketGET.html
 
 	// collect parameters
-	vars := mux.Vars(r)
-	bucket := vars["bucket"]
-
-	glog.V(4).Infof("read v2: %v", vars)
+	bucket, _ := getBucketAndObject(r)
 
 	originalPrefix, marker, startAfter, delimiter, _, maxKeys := getListObjectsV2Args(r.URL.Query())
 
@@ -43,7 +38,7 @@ func (s3a *S3ApiServer) ListObjectsV2Handler(w http.ResponseWriter, r *http.Requ
 		marker = startAfter
 	}
 
-	response, err := s3a.listFilerEntries(bucket, originalPrefix, maxKeys, marker)
+	response, err := s3a.listFilerEntries(bucket, originalPrefix, maxKeys, marker, delimiter)
 
 	if err != nil {
 		writeErrorResponse(w, ErrInternalError, r.URL)
@@ -58,8 +53,7 @@ func (s3a *S3ApiServer) ListObjectsV1Handler(w http.ResponseWriter, r *http.Requ
 	// https://docs.aws.amazon.com/AmazonS3/latest/API/RESTBucketGET.html
 
 	// collect parameters
-	vars := mux.Vars(r)
-	bucket := vars["bucket"]
+	bucket, _ := getBucketAndObject(r)
 
 	originalPrefix, marker, delimiter, maxKeys := getListObjectsV1Args(r.URL.Query())
 
@@ -72,7 +66,7 @@ func (s3a *S3ApiServer) ListObjectsV1Handler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	response, err := s3a.listFilerEntries(bucket, originalPrefix, maxKeys, marker)
+	response, err := s3a.listFilerEntries(bucket, originalPrefix, maxKeys, marker, delimiter)
 
 	if err != nil {
 		writeErrorResponse(w, ErrInternalError, r.URL)
@@ -82,8 +76,7 @@ func (s3a *S3ApiServer) ListObjectsV1Handler(w http.ResponseWriter, r *http.Requ
 	writeSuccessResponseXML(w, encodeResponse(response))
 }
 
-func (s3a *S3ApiServer) listFilerEntries(bucket, originalPrefix string, maxKeys int, marker string) (response ListBucketResult, err error) {
-
+func (s3a *S3ApiServer) listFilerEntries(bucket, originalPrefix string, maxKeys int, marker string, delimiter string) (response ListBucketResult, err error) {
 	// convert full path prefix into directory name and prefix for entry name
 	dir, prefix := filepath.Split(originalPrefix)
 	if strings.HasPrefix(dir, "/") {
@@ -131,9 +124,18 @@ func (s3a *S3ApiServer) listFilerEntries(bucket, originalPrefix string, maxKeys 
 			lastEntryName = entry.Name
 			if entry.IsDirectory {
 				if entry.Name != ".uploads" {
+					prefix = fmt.Sprintf("%s%s/", dir, entry.Name)
+
 					commonPrefixes = append(commonPrefixes, PrefixEntry{
-						Prefix: fmt.Sprintf("%s%s/", dir, entry.Name),
+						Prefix: prefix,
 					})
+
+					if delimiter != "/" {
+						response, _ := s3a.listFilerEntries(bucket, prefix, maxKeys, marker, delimiter)
+						for _, content := range response.Contents {
+							contents = append(contents, content)
+						}
+					}
 				}
 			} else {
 				contents = append(contents, ListEntry{

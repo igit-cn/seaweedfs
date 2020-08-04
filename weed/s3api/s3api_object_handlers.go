@@ -32,9 +32,7 @@ func (s3a *S3ApiServer) PutObjectHandler(w http.ResponseWriter, r *http.Request)
 
 	// http://docs.aws.amazon.com/AmazonS3/latest/dev/UploadingObjects.html
 
-	vars := mux.Vars(r)
-	bucket := vars["bucket"]
-	object := getObject(vars)
+	bucket, object := getBucketAndObject(r)
 
 	_, err := validateContentMd5(r.Header)
 	if err != nil {
@@ -45,8 +43,13 @@ func (s3a *S3ApiServer) PutObjectHandler(w http.ResponseWriter, r *http.Request)
 	rAuthType := getRequestAuthType(r)
 	dataReader := r.Body
 	var s3ErrCode ErrorCode
-	if rAuthType == authTypeStreamingSigned {
+	switch rAuthType {
+	case authTypeStreamingSigned:
 		dataReader, s3ErrCode = s3a.iam.newSignV4ChunkedReader(r)
+	case authTypeSignedV2, authTypePresignedV2:
+		_, s3ErrCode = s3a.iam.isReqAuthenticatedV2(r)
+	case authTypePresigned, authTypeSigned:
+		_, s3ErrCode = s3a.iam.reqSignatureV4Verify(r)
 	}
 	if s3ErrCode != ErrNone {
 		writeErrorResponse(w, s3ErrCode, r.URL)
@@ -54,25 +57,30 @@ func (s3a *S3ApiServer) PutObjectHandler(w http.ResponseWriter, r *http.Request)
 	}
 	defer dataReader.Close()
 
-	uploadUrl := fmt.Sprintf("http://%s%s/%s%s", s3a.option.Filer, s3a.option.BucketsPath, bucket, object)
+	if strings.HasSuffix(object, "/") {
+		if err := s3a.mkdir(s3a.option.BucketsPath, bucket+object, nil); err != nil {
+			writeErrorResponse(w, ErrInternalError, r.URL)
+			return
+		}
+	} else {
+		uploadUrl := fmt.Sprintf("http://%s%s/%s%s", s3a.option.Filer, s3a.option.BucketsPath, bucket, object)
 
-	etag, errCode := s3a.putToFiler(r, uploadUrl, dataReader)
+		etag, errCode := s3a.putToFiler(r, uploadUrl, dataReader)
 
-	if errCode != ErrNone {
-		writeErrorResponse(w, errCode, r.URL)
-		return
+		if errCode != ErrNone {
+			writeErrorResponse(w, errCode, r.URL)
+			return
+		}
+
+		setEtag(w, etag)
 	}
-
-	setEtag(w, etag)
 
 	writeSuccessResponseEmpty(w)
 }
 
 func (s3a *S3ApiServer) GetObjectHandler(w http.ResponseWriter, r *http.Request) {
 
-	vars := mux.Vars(r)
-	bucket := vars["bucket"]
-	object := getObject(vars)
+	bucket, object := getBucketAndObject(r)
 
 	if strings.HasSuffix(r.URL.Path, "/") {
 		writeErrorResponse(w, ErrNotImplemented, r.URL)
@@ -88,9 +96,7 @@ func (s3a *S3ApiServer) GetObjectHandler(w http.ResponseWriter, r *http.Request)
 
 func (s3a *S3ApiServer) HeadObjectHandler(w http.ResponseWriter, r *http.Request) {
 
-	vars := mux.Vars(r)
-	bucket := vars["bucket"]
-	object := getObject(vars)
+	bucket, object := getBucketAndObject(r)
 
 	destUrl := fmt.Sprintf("http://%s%s/%s%s",
 		s3a.option.Filer, s3a.option.BucketsPath, bucket, object)
@@ -101,9 +107,7 @@ func (s3a *S3ApiServer) HeadObjectHandler(w http.ResponseWriter, r *http.Request
 
 func (s3a *S3ApiServer) DeleteObjectHandler(w http.ResponseWriter, r *http.Request) {
 
-	vars := mux.Vars(r)
-	bucket := vars["bucket"]
-	object := getObject(vars)
+	bucket, object := getBucketAndObject(r)
 
 	destUrl := fmt.Sprintf("http://%s%s/%s%s?recursive=true",
 		s3a.option.Filer, s3a.option.BucketsPath, bucket, object)
@@ -117,7 +121,7 @@ func (s3a *S3ApiServer) DeleteObjectHandler(w http.ResponseWriter, r *http.Reque
 
 }
 
-/// ObjectIdentifier carries key name for the object to delete.
+// / ObjectIdentifier carries key name for the object to delete.
 type ObjectIdentifier struct {
 	ObjectName string `xml:"Key"`
 }
@@ -151,8 +155,7 @@ type DeleteObjectsResponse struct {
 // DeleteMultipleObjectsHandler - Delete multiple objects
 func (s3a *S3ApiServer) DeleteMultipleObjectsHandler(w http.ResponseWriter, r *http.Request) {
 
-	vars := mux.Vars(r)
-	bucket := vars["bucket"]
+	bucket, _ := getBucketAndObject(r)
 
 	deleteXMLBytes, err := ioutil.ReadAll(r.Body)
 	if err != nil {
@@ -226,6 +229,11 @@ func (s3a *S3ApiServer) proxyToFiler(w http.ResponseWriter, r *http.Request, des
 	}
 
 	resp, postErr := client.Do(proxyReq)
+
+	if resp.ContentLength == -1 {
+		writeErrorResponse(w, ErrNoSuchKey, r.URL)
+		return
+	}
 
 	if postErr != nil {
 		glog.Errorf("post to filer: %v", postErr)
@@ -305,10 +313,13 @@ func setEtag(w http.ResponseWriter, etag string) {
 	}
 }
 
-func getObject(vars map[string]string) string {
-	object := vars["object"]
+func getBucketAndObject(r *http.Request) (bucket, object string) {
+	vars := mux.Vars(r)
+	bucket = vars["bucket"]
+	object = vars["object"]
 	if !strings.HasPrefix(object, "/") {
 		object = "/" + object
 	}
-	return object
+
+	return
 }

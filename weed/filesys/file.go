@@ -213,7 +213,6 @@ func (file *File) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 func (file *File) Forget() {
 	t := util.NewFullPath(file.dir.FullPath(), file.Name)
 	glog.V(3).Infof("Forget file %s", t)
-	file.wfs.fsNodeCache.DeleteFsNode(t)
 }
 
 func (file *File) maybeLoadEntry(ctx context.Context) error {
@@ -253,7 +252,7 @@ func (file *File) addChunks(chunks []*filer_pb.FileChunk) {
 
 func (file *File) setEntry(entry *filer_pb.Entry) {
 	file.entry = entry
-	file.entryViewCache = filer2.NonOverlappingVisibleIntervals(file.entry.Chunks)
+	file.entryViewCache, _ = filer2.NonOverlappingVisibleIntervals(filer2.LookupFn(file.wfs), file.entry.Chunks)
 	file.reader = nil
 }
 
