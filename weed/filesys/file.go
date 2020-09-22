@@ -10,7 +10,7 @@ import (
 	"github.com/seaweedfs/fuse"
 	"github.com/seaweedfs/fuse/fs"
 
-	"github.com/chrislusf/seaweedfs/weed/filer2"
+	"github.com/chrislusf/seaweedfs/weed/filer"
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
 	"github.com/chrislusf/seaweedfs/weed/util"
@@ -33,7 +33,7 @@ type File struct {
 	dir            *Dir
 	wfs            *WFS
 	entry          *filer_pb.Entry
-	entryViewCache []filer2.VisibleInterval
+	entryViewCache []filer.VisibleInterval
 	isOpen         int
 	reader         io.ReaderAt
 	dirtyMetadata  bool
@@ -45,7 +45,7 @@ func (file *File) fullpath() util.FullPath {
 
 func (file *File) Attr(ctx context.Context, attr *fuse.Attr) error {
 
-	glog.V(5).Infof("file Attr %s, open:%v, existing attr: %+v", file.fullpath(), file.isOpen, attr)
+	glog.V(4).Infof("file Attr %s, open:%v, existing attr: %+v", file.fullpath(), file.isOpen, attr)
 
 	if file.isOpen <= 0 {
 		if err := file.maybeLoadEntry(ctx); err != nil {
@@ -56,7 +56,7 @@ func (file *File) Attr(ctx context.Context, attr *fuse.Attr) error {
 	attr.Inode = file.fullpath().AsInode()
 	attr.Valid = time.Second
 	attr.Mode = os.FileMode(file.entry.Attributes.FileMode)
-	attr.Size = filer2.FileSize(file.entry)
+	attr.Size = filer.FileSize(file.entry)
 	if file.isOpen > 0 {
 		attr.Size = file.entry.Attributes.FileSize
 		glog.V(4).Infof("file Attr %s, open:%v, size: %d", file.fullpath(), file.isOpen, attr.Size)
@@ -87,8 +87,6 @@ func (file *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.Op
 
 	glog.V(4).Infof("file %v open %+v", file.fullpath(), req)
 
-	file.isOpen++
-
 	handle := file.wfs.AcquireHandle(file, req.Uid, req.Gid)
 
 	resp.Handle = fuse.HandleID(handle.handle)
@@ -101,16 +99,26 @@ func (file *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.Op
 
 func (file *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
 
-	glog.V(5).Infof("%v file setattr %+v", file.fullpath(), req)
+	glog.V(4).Infof("%v file setattr %+v", file.fullpath(), req)
 
 	if err := file.maybeLoadEntry(ctx); err != nil {
 		return err
+	}
+	if file.isOpen > 0 {
+		file.wfs.handlesLock.Lock()
+		fileHandle := file.wfs.handles[file.fullpath().AsInode()]
+		file.wfs.handlesLock.Unlock()
+
+		if fileHandle != nil {
+			fileHandle.Lock()
+			defer fileHandle.Unlock()
+		}
 	}
 
 	if req.Valid.Size() {
 
 		glog.V(4).Infof("%v file setattr set size=%v chunks=%d", file.fullpath(), req.Size, len(file.entry.Chunks))
-		if req.Size < filer2.TotalSize(file.entry.Chunks) {
+		if req.Size < filer.FileSize(file.entry) {
 			// fmt.Printf("truncate %v \n", fullPath)
 			var chunks []*filer_pb.FileChunk
 			var truncatedChunks []*filer_pb.FileChunk
@@ -129,10 +137,10 @@ func (file *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *f
 					}
 				}
 			}
-			file.wfs.deleteFileChunks(truncatedChunks)
 			file.entry.Chunks = chunks
 			file.entryViewCache = nil
 			file.reader = nil
+			file.wfs.deleteFileChunks(truncatedChunks)
 		}
 		file.entry.Attributes.FileSize = req.Size
 		file.dirtyMetadata = true
@@ -237,12 +245,12 @@ func (file *File) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 
 func (file *File) Forget() {
 	t := util.NewFullPath(file.dir.FullPath(), file.Name)
-	glog.V(5).Infof("Forget file %s", t)
+	glog.V(4).Infof("Forget file %s", t)
 	file.wfs.fsNodeCache.DeleteFsNode(t)
 }
 
 func (file *File) maybeLoadEntry(ctx context.Context) error {
-	if file.entry == nil || file.isOpen <= 0 {
+	if file.entry == nil && file.isOpen <= 0 {
 		entry, err := file.wfs.maybeLoadEntry(file.dir.FullPath(), file.Name)
 		if err != nil {
 			glog.V(3).Infof("maybeLoadEntry file %s/%s: %v", file.dir.FullPath(), file.Name, err)
@@ -258,15 +266,14 @@ func (file *File) maybeLoadEntry(ctx context.Context) error {
 func (file *File) addChunks(chunks []*filer_pb.FileChunk) {
 
 	sort.Slice(chunks, func(i, j int) bool {
+		if chunks[i].Mtime == chunks[j].Mtime {
+			return chunks[i].Fid.FileKey < chunks[j].Fid.FileKey
+		}
 		return chunks[i].Mtime < chunks[j].Mtime
 	})
 
-	var newVisibles []filer2.VisibleInterval
 	for _, chunk := range chunks {
-		newVisibles = filer2.MergeIntoVisibles(file.entryViewCache, newVisibles, chunk)
-		t := file.entryViewCache[:0]
-		file.entryViewCache = newVisibles
-		newVisibles = t
+		file.entryViewCache = filer.MergeIntoVisibles(file.entryViewCache, chunk)
 	}
 
 	file.reader = nil
@@ -278,16 +285,20 @@ func (file *File) addChunks(chunks []*filer_pb.FileChunk) {
 
 func (file *File) setEntry(entry *filer_pb.Entry) {
 	file.entry = entry
-	file.entryViewCache, _ = filer2.NonOverlappingVisibleIntervals(filer2.LookupFn(file.wfs), file.entry.Chunks)
+	file.entryViewCache, _ = filer.NonOverlappingVisibleIntervals(filer.LookupFn(file.wfs), file.entry.Chunks)
 	file.reader = nil
 }
 
 func (file *File) saveEntry() error {
 	return file.wfs.WithFilerClient(func(client filer_pb.SeaweedFilerClient) error {
 
+		file.wfs.mapPbIdFromLocalToFiler(file.entry)
+		defer file.wfs.mapPbIdFromFilerToLocal(file.entry)
+
 		request := &filer_pb.UpdateEntryRequest{
-			Directory: file.dir.FullPath(),
-			Entry:     file.entry,
+			Directory:  file.dir.FullPath(),
+			Entry:      file.entry,
+			Signatures: []int32{file.wfs.signature},
 		}
 
 		glog.V(4).Infof("save file entry: %v", request)
@@ -297,7 +308,7 @@ func (file *File) saveEntry() error {
 			return fuse.EIO
 		}
 
-		file.wfs.metaCache.UpdateEntry(context.Background(), filer2.FromPbEntry(request.Directory, request.Entry))
+		file.wfs.metaCache.UpdateEntry(context.Background(), filer.FromPbEntry(request.Directory, request.Entry))
 
 		return nil
 	})

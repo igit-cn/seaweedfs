@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"github.com/chrislusf/seaweedfs/weed/s3api/s3err"
 	"io"
 	"net/http"
 	"net/url"
@@ -12,23 +13,23 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chrislusf/seaweedfs/weed/filer2"
+	"github.com/chrislusf/seaweedfs/weed/filer"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
 )
 
 type ListBucketResultV2 struct {
-	XMLName               xml.Name        `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListBucketResult"`
-	Name                  string          `xml:"Name"`
-	Prefix                string          `xml:"Prefix"`
-	MaxKeys               int             `xml:"MaxKeys"`
-	Delimiter             string          `xml:"Delimiter,omitempty"`
-	IsTruncated           bool            `xml:"IsTruncated"`
-	Contents              []ListEntry     `xml:"Contents,omitempty"`
-	CommonPrefixes        []PrefixEntry   `xml:"CommonPrefixes,omitempty"`
-	ContinuationToken     string          `xml:"ContinuationToken,omitempty"`
-	NextContinuationToken string          `xml:"NextContinuationToken,omitempty"`
-	KeyCount              int             `xml:"KeyCount"`
-	StartAfter            string          `xml:"StartAfter,omitempty"`
+	XMLName               xml.Name      `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListBucketResult"`
+	Name                  string        `xml:"Name"`
+	Prefix                string        `xml:"Prefix"`
+	MaxKeys               int           `xml:"MaxKeys"`
+	Delimiter             string        `xml:"Delimiter,omitempty"`
+	IsTruncated           bool          `xml:"IsTruncated"`
+	Contents              []ListEntry   `xml:"Contents,omitempty"`
+	CommonPrefixes        []PrefixEntry `xml:"CommonPrefixes,omitempty"`
+	ContinuationToken     string        `xml:"ContinuationToken,omitempty"`
+	NextContinuationToken string        `xml:"NextContinuationToken,omitempty"`
+	KeyCount              int           `xml:"KeyCount"`
+	StartAfter            string        `xml:"StartAfter,omitempty"`
 }
 
 func (s3a *S3ApiServer) ListObjectsV2Handler(w http.ResponseWriter, r *http.Request) {
@@ -41,11 +42,11 @@ func (s3a *S3ApiServer) ListObjectsV2Handler(w http.ResponseWriter, r *http.Requ
 	originalPrefix, continuationToken, startAfter, delimiter, _, maxKeys := getListObjectsV2Args(r.URL.Query())
 
 	if maxKeys < 0 {
-		writeErrorResponse(w, ErrInvalidMaxKeys, r.URL)
+		writeErrorResponse(w, s3err.ErrInvalidMaxKeys, r.URL)
 		return
 	}
 	if delimiter != "" && delimiter != "/" {
-		writeErrorResponse(w, ErrNotImplemented, r.URL)
+		writeErrorResponse(w, s3err.ErrNotImplemented, r.URL)
 		return
 	}
 
@@ -57,7 +58,7 @@ func (s3a *S3ApiServer) ListObjectsV2Handler(w http.ResponseWriter, r *http.Requ
 	response, err := s3a.listFilerEntries(bucket, originalPrefix, maxKeys, marker, delimiter)
 
 	if err != nil {
-		writeErrorResponse(w, ErrInternalError, r.URL)
+		writeErrorResponse(w, s3err.ErrInternalError, r.URL)
 		return
 	}
 	responseV2 := &ListBucketResultV2{
@@ -88,18 +89,18 @@ func (s3a *S3ApiServer) ListObjectsV1Handler(w http.ResponseWriter, r *http.Requ
 	originalPrefix, marker, delimiter, maxKeys := getListObjectsV1Args(r.URL.Query())
 
 	if maxKeys < 0 {
-		writeErrorResponse(w, ErrInvalidMaxKeys, r.URL)
+		writeErrorResponse(w, s3err.ErrInvalidMaxKeys, r.URL)
 		return
 	}
 	if delimiter != "" && delimiter != "/" {
-		writeErrorResponse(w, ErrNotImplemented, r.URL)
+		writeErrorResponse(w, s3err.ErrNotImplemented, r.URL)
 		return
 	}
 
 	response, err := s3a.listFilerEntries(bucket, originalPrefix, maxKeys, marker, delimiter)
 
 	if err != nil {
-		writeErrorResponse(w, ErrInternalError, r.URL)
+		writeErrorResponse(w, s3err.ErrInternalError, r.URL)
 		return
 	}
 
@@ -139,8 +140,8 @@ func (s3a *S3ApiServer) listFilerEntries(bucket string, originalPrefix string, m
 				contents = append(contents, ListEntry{
 					Key:          fmt.Sprintf("%s/%s", dir, entry.Name)[len(bucketPrefix):],
 					LastModified: time.Unix(entry.Attributes.Mtime, 0).UTC(),
-					ETag:         "\"" + filer2.ETag(entry) + "\"",
-					Size:         int64(filer2.FileSize(entry)),
+					ETag:         "\"" + filer.ETag(entry) + "\"",
+					Size:         int64(filer.FileSize(entry)),
 					Owner: CanonicalUser{
 						ID:          fmt.Sprintf("%x", entry.Attributes.Uid),
 						DisplayName: entry.Attributes.UserName,
@@ -212,7 +213,9 @@ func (s3a *S3ApiServer) doListFilerEntries(client filer_pb.SeaweedFilerClient, d
 		InclusiveStartFrom: false,
 	}
 
-	stream, listErr := client.ListEntries(context.Background(), request)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream, listErr := client.ListEntries(ctx, request)
 	if listErr != nil {
 		err = fmt.Errorf("list entires %+v: %v", request, listErr)
 		return

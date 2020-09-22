@@ -12,7 +12,6 @@ import (
 
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/pb/master_pb"
-	"github.com/chrislusf/seaweedfs/weed/storage/backend"
 	"github.com/chrislusf/seaweedfs/weed/storage/needle"
 	"github.com/chrislusf/seaweedfs/weed/topology"
 )
@@ -72,10 +71,7 @@ func (ms *MasterServer) SendHeartbeat(stream master_pb.Seaweed_SendHeartbeatServ
 				int64(heartbeat.MaxVolumeCount))
 			glog.V(0).Infof("added volume server %v:%d", heartbeat.GetIp(), heartbeat.GetPort())
 			if err := stream.Send(&master_pb.HeartbeatResponse{
-				VolumeSizeLimit:        uint64(ms.option.VolumeSizeLimitMB) * 1024 * 1024,
-				MetricsAddress:         ms.option.MetricsAddress,
-				MetricsIntervalSeconds: uint32(ms.option.MetricsIntervalSec),
-				StorageBackends:        backend.ToPbStorageBackends(),
+				VolumeSizeLimit: uint64(ms.option.VolumeSizeLimitMB) * 1024 * 1024,
 			}); err != nil {
 				glog.Warningf("SendHeartbeat.Send volume size to %s:%d %v", dn.Ip, dn.Port, err)
 				return err
@@ -87,7 +83,7 @@ func (ms *MasterServer) SendHeartbeat(stream master_pb.Seaweed_SendHeartbeatServ
 			dn.UpAdjustMaxVolumeCountDelta(delta)
 		}
 
-		glog.V(5).Infof("master received heartbeat %s", heartbeat.String())
+		glog.V(4).Infof("master received heartbeat %s", heartbeat.String())
 		message := &master_pb.VolumeLocation{
 			Url:       dn.Url(),
 			PublicUrl: dn.PublicUrl,
@@ -136,7 +132,7 @@ func (ms *MasterServer) SendHeartbeat(stream master_pb.Seaweed_SendHeartbeatServ
 		}
 
 		if len(heartbeat.EcShards) > 0 || heartbeat.HasNoEcShards {
-			glog.V(1).Infof("master recieved ec shards from %s: %+v", dn.Url(), heartbeat.EcShards)
+			glog.V(1).Infof("master received ec shards from %s: %+v", dn.Url(), heartbeat.EcShards)
 			newShards, deletedShards := ms.Topo.SyncDataNodeEcShards(heartbeat.EcShards, dn)
 
 			// broadcast the ec vid changes to master clients
@@ -191,7 +187,8 @@ func (ms *MasterServer) KeepConnected(stream master_pb.Seaweed_KeepConnectedServ
 
 	peerAddress := findClientAddress(stream.Context(), req.GrpcPort)
 
-	stopChan := make(chan bool)
+	// buffer by 1 so we don't end up getting stuck writing to stopChan forever
+	stopChan := make(chan bool, 1)
 
 	clientName, messageChan := ms.addClient(req.Name, peerAddress)
 
@@ -251,7 +248,12 @@ func (ms *MasterServer) addClient(clientType string, clientAddress string) (clie
 	clientName = clientType + "@" + clientAddress
 	glog.V(0).Infof("+ client %v", clientName)
 
-	messageChan = make(chan *master_pb.VolumeLocation)
+	// we buffer this because otherwise we end up in a potential deadlock where
+	// the KeepConnected loop is no longer listening on this channel but we're
+	// trying to send to it in SendHeartbeat and so we can't lock the
+	// clientChansLock to remove the channel and we're stuck writing to it
+	// 100 is probably overkill
+	messageChan = make(chan *master_pb.VolumeLocation, 100)
 
 	ms.clientChansLock.Lock()
 	ms.clientChans[clientName] = messageChan

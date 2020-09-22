@@ -2,6 +2,7 @@ package weed_server
 
 import (
 	"fmt"
+	"github.com/chrislusf/seaweedfs/weed/operation"
 	"time"
 
 	"google.golang.org/grpc"
@@ -21,6 +22,31 @@ import (
 func (vs *VolumeServer) GetMaster() string {
 	return vs.currentMaster
 }
+
+func (vs *VolumeServer) checkWithMaster() (err error) {
+	isConnected := false
+	for !isConnected {
+		for _, master := range vs.SeedMasterNodes {
+			err = operation.WithMasterServerClient(master, vs.grpcDialOption, func(masterClient master_pb.SeaweedClient) error {
+				resp, err := masterClient.GetMasterConfiguration(context.Background(), &master_pb.GetMasterConfigurationRequest{})
+				if err != nil {
+					return fmt.Errorf("get master %s configuration: %v", master, err)
+				}
+				vs.metricsAddress, vs.metricsIntervalSec = resp.MetricsAddress, int(resp.MetricsIntervalSeconds)
+				backend.LoadFromPbStorageBackends(resp.StorageBackends)
+				return nil
+			})
+			if err == nil {
+				return
+			} else {
+				glog.V(0).Infof("checkWithMaster %s: %v", master, err)
+			}
+		}
+		time.Sleep(1790 * time.Millisecond)
+	}
+	return
+}
+
 func (vs *VolumeServer) heartbeat() {
 
 	glog.V(0).Infof("Volume server start with seed master nodes: %v", vs.SeedMasterNodes)
@@ -31,7 +57,7 @@ func (vs *VolumeServer) heartbeat() {
 
 	var err error
 	var newLeader string
-	for {
+	for vs.isHeartbeating {
 		for _, master := range vs.SeedMasterNodes {
 			if newLeader != "" {
 				// the new leader may actually is the same master
@@ -52,20 +78,35 @@ func (vs *VolumeServer) heartbeat() {
 				newLeader = ""
 				vs.store.MasterAddress = ""
 			}
+			if !vs.isHeartbeating {
+				break
+			}
 		}
 	}
 }
 
+func (vs *VolumeServer) StopHeartbeat() (isAlreadyStopping bool) {
+	if !vs.isHeartbeating {
+		return true
+	}
+	vs.isHeartbeating = false
+	vs.stopChan <- true
+	return false
+}
+
 func (vs *VolumeServer) doHeartbeat(masterNode, masterGrpcAddress string, grpcDialOption grpc.DialOption, sleepInterval time.Duration) (newLeader string, err error) {
 
-	grpcConection, err := pb.GrpcDial(context.Background(), masterGrpcAddress, grpcDialOption)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	grpcConection, err := pb.GrpcDial(ctx, masterGrpcAddress, grpcDialOption)
 	if err != nil {
 		return "", fmt.Errorf("fail to dial %s : %v", masterNode, err)
 	}
 	defer grpcConection.Close()
 
 	client := master_pb.NewSeaweedClient(grpcConection)
-	stream, err := client.SendHeartbeat(context.Background())
+	stream, err := client.SendHeartbeat(ctx)
 	if err != nil {
 		glog.V(0).Infof("SendHeartbeat to %s: %v", masterNode, err)
 		return "", err
@@ -95,13 +136,6 @@ func (vs *VolumeServer) doHeartbeat(masterNode, masterGrpcAddress string, grpcDi
 				newLeader = in.GetLeader()
 				doneChan <- nil
 				return
-			}
-			if in.GetMetricsAddress() != "" && vs.MetricsAddress != in.GetMetricsAddress() {
-				vs.MetricsAddress = in.GetMetricsAddress()
-				vs.MetricsIntervalSec = int(in.GetMetricsIntervalSeconds())
-			}
-			if len(in.StorageBackends) > 0 {
-				backend.LoadFromPbStorageBackends(in.StorageBackends)
 			}
 		}
 	}()
@@ -168,18 +202,20 @@ func (vs *VolumeServer) doHeartbeat(masterNode, masterGrpcAddress string, grpcDi
 				return "", err
 			}
 		case <-volumeTickChan:
-			glog.V(5).Infof("volume server %s:%d heartbeat", vs.store.Ip, vs.store.Port)
+			glog.V(4).Infof("volume server %s:%d heartbeat", vs.store.Ip, vs.store.Port)
 			if err = stream.Send(vs.store.CollectHeartbeat()); err != nil {
 				glog.V(0).Infof("Volume Server Failed to talk with master %s: %v", masterNode, err)
 				return "", err
 			}
 		case <-ecShardTickChan:
-			glog.V(5).Infof("volume server %s:%d ec heartbeat", vs.store.Ip, vs.store.Port)
+			glog.V(4).Infof("volume server %s:%d ec heartbeat", vs.store.Ip, vs.store.Port)
 			if err = stream.Send(vs.store.CollectErasureCodingHeartbeat()); err != nil {
 				glog.V(0).Infof("Volume Server Failed to talk with master %s: %v", masterNode, err)
 				return "", err
 			}
 		case err = <-doneChan:
+			return
+		case <-vs.stopChan:
 			return
 		}
 	}

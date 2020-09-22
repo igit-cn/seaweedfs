@@ -45,7 +45,7 @@ type Option struct {
 
 	OutsideContainerClusterMode bool // whether the mount runs outside SeaweedFS containers
 	Cipher                      bool // whether encrypt data on volume server
-
+	UidGidMapper                *meta_cache.UidGidMapper
 }
 
 var _ = fs.FS(&WFS{})
@@ -67,6 +67,7 @@ type WFS struct {
 
 	chunkCache *chunk_cache.TieredChunkCache
 	metaCache  *meta_cache.MetaCache
+	signature  int32
 }
 type statsCache struct {
 	filer_pb.StatisticsResponse
@@ -82,6 +83,7 @@ func NewSeaweedFileSystem(option *Option) *WFS {
 				return make([]byte, option.ChunkSizeLimit)
 			},
 		},
+		signature: util.RandomInt32(),
 	}
 	cacheUniqueId := util.Md5String([]byte(option.FilerGrpcAddress + option.FilerMountRootPath + util.Version()))[0:4]
 	cacheDir := path.Join(option.CacheDir, cacheUniqueId)
@@ -90,9 +92,9 @@ func NewSeaweedFileSystem(option *Option) *WFS {
 		wfs.chunkCache = chunk_cache.NewTieredChunkCache(256, cacheDir, option.CacheSizeMB)
 	}
 
-	wfs.metaCache = meta_cache.NewMetaCache(path.Join(cacheDir, "meta"))
+	wfs.metaCache = meta_cache.NewMetaCache(path.Join(cacheDir, "meta"), option.UidGidMapper)
 	startTime := time.Now()
-	go meta_cache.SubscribeMetaEvents(wfs.metaCache, wfs, wfs.option.FilerMountRootPath, startTime.UnixNano())
+	go meta_cache.SubscribeMetaEvents(wfs.metaCache, wfs.signature, wfs, wfs.option.FilerMountRootPath, startTime.UnixNano())
 	grace.OnInterrupt(func() {
 		wfs.metaCache.Shutdown()
 	})
@@ -118,10 +120,14 @@ func (wfs *WFS) AcquireHandle(file *File, uid, gid uint32) (fileHandle *FileHand
 	inodeId := file.fullpath().AsInode()
 	existingHandle, found := wfs.handles[inodeId]
 	if found && existingHandle != nil {
+		file.isOpen++
 		return existingHandle
 	}
 
 	fileHandle = newFileHandle(file, uid, gid)
+	file.maybeLoadEntry(context.Background())
+	file.isOpen++
+
 	wfs.handles[inodeId] = fileHandle
 	fileHandle.handle = inodeId
 
@@ -142,7 +148,7 @@ func (wfs *WFS) ReleaseHandle(fullpath util.FullPath, handleId fuse.HandleID) {
 // Statfs is called to obtain file system metadata. Implements fuse.FSStatfser
 func (wfs *WFS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.StatfsResponse) error {
 
-	glog.V(5).Infof("reading fs stats: %+v", req)
+	glog.V(4).Infof("reading fs stats: %+v", req)
 
 	if wfs.stats.lastChecked < time.Now().Unix()-20 {
 
@@ -154,13 +160,13 @@ func (wfs *WFS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.
 				Ttl:         fmt.Sprintf("%ds", wfs.option.TtlSec),
 			}
 
-			glog.V(5).Infof("reading filer stats: %+v", request)
+			glog.V(4).Infof("reading filer stats: %+v", request)
 			resp, err := client.Statistics(context.Background(), request)
 			if err != nil {
 				glog.V(0).Infof("reading filer stats %v: %v", request, err)
 				return err
 			}
-			glog.V(5).Infof("read filer stats: %+v", resp)
+			glog.V(4).Infof("read filer stats: %+v", resp)
 
 			wfs.stats.TotalSize = resp.TotalSize
 			wfs.stats.UsedSize = resp.UsedSize
@@ -199,4 +205,11 @@ func (wfs *WFS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.
 	resp.Frsize = uint32(blockSize)
 
 	return nil
+}
+
+func (wfs *WFS) mapPbIdFromFilerToLocal(entry *filer_pb.Entry) {
+	entry.Attributes.Uid, entry.Attributes.Gid = wfs.option.UidGidMapper.FilerToLocal(entry.Attributes.Uid, entry.Attributes.Gid)
+}
+func (wfs *WFS) mapPbIdFromLocalToFiler(entry *filer_pb.Entry) {
+	entry.Attributes.Uid, entry.Attributes.Gid = wfs.option.UidGidMapper.LocalToFiler(entry.Attributes.Uid, entry.Attributes.Gid)
 }

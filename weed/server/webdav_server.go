@@ -19,7 +19,7 @@ import (
 	"github.com/chrislusf/seaweedfs/weed/util"
 	"github.com/chrislusf/seaweedfs/weed/util/chunk_cache"
 
-	"github.com/chrislusf/seaweedfs/weed/filer2"
+	"github.com/chrislusf/seaweedfs/weed/filer"
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/security"
 )
@@ -41,7 +41,7 @@ type WebDavOption struct {
 type WebDavServer struct {
 	option         *WebDavOption
 	secret         security.SigningKey
-	filer          *filer2.Filer
+	filer          *filer.Filer
 	grpcDialOption grpc.DialOption
 	Handler        *webdav.Handler
 }
@@ -67,9 +67,10 @@ func NewWebDavServer(option *WebDavOption) (ws *WebDavServer, err error) {
 type WebDavFileSystem struct {
 	option         *WebDavOption
 	secret         security.SigningKey
-	filer          *filer2.Filer
+	filer          *filer.Filer
 	grpcDialOption grpc.DialOption
 	chunkCache     *chunk_cache.TieredChunkCache
+	signature      int32
 }
 
 type FileInfo struct {
@@ -93,7 +94,7 @@ type WebDavFile struct {
 	isDirectory    bool
 	off            int64
 	entry          *filer_pb.Entry
-	entryViewCache []filer2.VisibleInterval
+	entryViewCache []filer.VisibleInterval
 	reader         io.ReaderAt
 }
 
@@ -103,6 +104,7 @@ func NewWebDavFileSystem(option *WebDavOption) (webdav.FileSystem, error) {
 	return &WebDavFileSystem{
 		option:     option,
 		chunkCache: chunkCache,
+		signature:  util.RandomInt32(),
 	}, nil
 }
 
@@ -165,6 +167,7 @@ func (fs *WebDavFileSystem) Mkdir(ctx context.Context, fullDirPath string, perm 
 					Gid:      fs.option.Gid,
 				},
 			},
+			Signatures: []int32{fs.signature},
 		}
 
 		glog.V(1).Infof("mkdir: %v", request)
@@ -216,6 +219,7 @@ func (fs *WebDavFileSystem) OpenFile(ctx context.Context, fullFilePath string, f
 						TtlSec:      0,
 					},
 				},
+				Signatures: []int32{fs.signature},
 			}); err != nil {
 				return fmt.Errorf("create %s: %v", fullFilePath, err)
 			}
@@ -255,7 +259,7 @@ func (fs *WebDavFileSystem) removeAll(ctx context.Context, fullFilePath string) 
 
 	dir, name := util.FullPath(fullFilePath).DirAndName()
 
-	return filer_pb.Remove(fs, dir, name, true, false, false, false)
+	return filer_pb.Remove(fs, dir, name, true, false, false, false, []int32{fs.signature})
 
 }
 
@@ -334,7 +338,7 @@ func (fs *WebDavFileSystem) stat(ctx context.Context, fullFilePath string) (os.F
 	if err != nil {
 		return nil, err
 	}
-	fi.size = int64(filer2.FileSize(entry))
+	fi.size = int64(filer.FileSize(entry))
 	fi.name = string(fullpath)
 	fi.mode = os.FileMode(entry.Attributes.FileMode)
 	fi.modifiledTime = time.Unix(entry.Attributes.Mtime, 0)
@@ -422,8 +426,9 @@ func (f *WebDavFile) Write(buf []byte) (int, error) {
 		f.entry.Attributes.Replication = replication
 
 		request := &filer_pb.UpdateEntryRequest{
-			Directory: dir,
-			Entry:     f.entry,
+			Directory:  dir,
+			Entry:      f.entry,
+			Signatures: []int32{f.fs.signature},
 		}
 
 		if _, err := client.UpdateEntry(ctx, request); err != nil {
@@ -466,17 +471,17 @@ func (f *WebDavFile) Read(p []byte) (readSize int, err error) {
 	if err != nil {
 		return 0, err
 	}
-	fileSize := int64(filer2.FileSize(f.entry))
+	fileSize := int64(filer.FileSize(f.entry))
 	if fileSize == 0 {
 		return 0, io.EOF
 	}
 	if f.entryViewCache == nil {
-		f.entryViewCache, _ = filer2.NonOverlappingVisibleIntervals(filer2.LookupFn(f.fs), f.entry.Chunks)
+		f.entryViewCache, _ = filer.NonOverlappingVisibleIntervals(filer.LookupFn(f.fs), f.entry.Chunks)
 		f.reader = nil
 	}
 	if f.reader == nil {
-		chunkViews := filer2.ViewFromVisibleIntervals(f.entryViewCache, 0, math.MaxInt32)
-		f.reader = filer2.NewChunkReaderAtFromClient(f.fs, chunkViews, f.fs.chunkCache, fileSize)
+		chunkViews := filer.ViewFromVisibleIntervals(f.entryViewCache, 0, math.MaxInt64)
+		f.reader = filer.NewChunkReaderAtFromClient(f.fs, chunkViews, f.fs.chunkCache, fileSize)
 	}
 
 	readSize, err = f.reader.ReadAt(p, f.off)
@@ -504,7 +509,7 @@ func (f *WebDavFile) Readdir(count int) (ret []os.FileInfo, err error) {
 
 	err = filer_pb.ReadDirAllEntries(f.fs, util.FullPath(dir), "", func(entry *filer_pb.Entry, isLast bool) error {
 		fi := FileInfo{
-			size:          int64(filer2.FileSize(entry)),
+			size:          int64(filer.FileSize(entry)),
 			name:          entry.Name,
 			mode:          os.FileMode(entry.Attributes.FileMode),
 			modifiledTime: time.Unix(entry.Attributes.Mtime, 0),
@@ -547,9 +552,9 @@ func (f *WebDavFile) Seek(offset int64, whence int) (int64, error) {
 
 	var err error
 	switch whence {
-	case 0:
+	case io.SeekStart:
 		f.off = 0
-	case 2:
+	case io.SeekEnd:
 		if fi, err := f.fs.stat(ctx, f.name); err != nil {
 			return 0, err
 		} else {

@@ -3,7 +3,6 @@ package operation
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -12,6 +11,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -86,7 +86,7 @@ func doUpload(uploadUrl string, filename string, cipher bool, reader io.Reader, 
 }
 
 func retriedUploadData(uploadUrl string, filename string, cipher bool, data []byte, isInputCompressed bool, mtype string, pairMap map[string]string, jwt security.EncodedJwt) (uploadResult *UploadResult, err error) {
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 1; i++ {
 		uploadResult, err = doUploadData(uploadUrl, filename, cipher, data, isInputCompressed, mtype, pairMap, jwt)
 		if err == nil {
 			return
@@ -210,8 +210,8 @@ func upload_content(uploadUrl string, fillBufferFunction func(w io.Writer) error
 
 	req, postErr := http.NewRequest("POST", uploadUrl, body_buf)
 	if postErr != nil {
-		glog.V(1).Infof("failing to upload to %s: %v", uploadUrl, postErr)
-		return nil, fmt.Errorf("failing to upload to %s: %v", uploadUrl, postErr)
+		glog.V(1).Infof("create upload request %s: %v", uploadUrl, postErr)
+		return nil, fmt.Errorf("create upload request %s: %v", uploadUrl, postErr)
 	}
 	req.Header.Set("Content-Type", content_type)
 	for k, v := range pairMap {
@@ -222,10 +222,11 @@ func upload_content(uploadUrl string, fillBufferFunction func(w io.Writer) error
 	}
 	resp, post_err := HttpClient.Do(req)
 	if post_err != nil {
-		glog.V(1).Infof("failing to upload to %v: %v", uploadUrl, post_err)
-		return nil, fmt.Errorf("failing to upload to %v: %v", uploadUrl, post_err)
+		glog.Errorf("upload %s %d bytes to %v: %v", filename, originalDataSize, uploadUrl, post_err)
+		debug.PrintStack()
+		return nil, fmt.Errorf("upload %s %d bytes to %v: %v", filename, originalDataSize, uploadUrl, post_err)
 	}
-	defer resp.Body.Close()
+	defer util.CloseResponse(resp)
 
 	var ret UploadResult
 	etag := getEtag(resp)
@@ -233,17 +234,19 @@ func upload_content(uploadUrl string, fillBufferFunction func(w io.Writer) error
 		ret.ETag = etag
 		return &ret, nil
 	}
+
 	resp_body, ra_err := ioutil.ReadAll(resp.Body)
 	if ra_err != nil {
-		return nil, ra_err
+		return nil, fmt.Errorf("read response body %v: %v", uploadUrl, ra_err)
 	}
+
 	unmarshal_err := json.Unmarshal(resp_body, &ret)
 	if unmarshal_err != nil {
-		glog.V(0).Infoln("failing to read upload response", uploadUrl, string(resp_body))
-		return nil, unmarshal_err
+		glog.Errorf("unmarshal %s: %v", uploadUrl, string(resp_body))
+		return nil, fmt.Errorf("unmarshal %v: %v", uploadUrl, unmarshal_err)
 	}
 	if ret.Error != "" {
-		return nil, errors.New(ret.Error)
+		return nil, fmt.Errorf("unmarshalled error %v: %v", uploadUrl, ret.Error)
 	}
 	ret.ETag = etag
 	ret.ContentMd5 = resp.Header.Get("Content-MD5")
