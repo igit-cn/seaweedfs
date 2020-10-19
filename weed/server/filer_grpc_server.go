@@ -32,11 +32,13 @@ func (fs *FilerServer) LookupDirectoryEntry(ctx context.Context, req *filer_pb.L
 
 	return &filer_pb.LookupDirectoryEntryResponse{
 		Entry: &filer_pb.Entry{
-			Name:        req.Name,
-			IsDirectory: entry.IsDirectory(),
-			Attributes:  filer.EntryAttributeToPb(entry),
-			Chunks:      entry.Chunks,
-			Extended:    entry.Extended,
+			Name:            req.Name,
+			IsDirectory:     entry.IsDirectory(),
+			Attributes:      filer.EntryAttributeToPb(entry),
+			Chunks:          entry.Chunks,
+			Extended:        entry.Extended,
+			HardLinkId:      entry.HardLinkId,
+			HardLinkCounter: entry.HardLinkCounter,
 		},
 	}, nil
 }
@@ -75,11 +77,13 @@ func (fs *FilerServer) ListEntries(req *filer_pb.ListEntriesRequest, stream file
 
 			if err := stream.Send(&filer_pb.ListEntriesResponse{
 				Entry: &filer_pb.Entry{
-					Name:        entry.Name(),
-					IsDirectory: entry.IsDirectory(),
-					Chunks:      entry.Chunks,
-					Attributes:  filer.EntryAttributeToPb(entry),
-					Extended:    entry.Extended,
+					Name:            entry.Name(),
+					IsDirectory:     entry.IsDirectory(),
+					Chunks:          entry.Chunks,
+					Attributes:      filer.EntryAttributeToPb(entry),
+					Extended:        entry.Extended,
+					HardLinkId:      entry.HardLinkId,
+					HardLinkCounter: entry.HardLinkCounter,
 				},
 			}); err != nil {
 				return err
@@ -131,16 +135,19 @@ func (fs *FilerServer) LookupVolume(ctx context.Context, req *filer_pb.LookupVol
 	return resp, nil
 }
 
-func (fs *FilerServer) lookupFileId(fileId string) (targetUrl string, err error) {
+func (fs *FilerServer) lookupFileId(fileId string) (targetUrls []string, err error) {
 	fid, err := needle.ParseFileIdFromString(fileId)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	locations, found := fs.filer.MasterClient.GetLocations(uint32(fid.VolumeId))
 	if !found || len(locations) == 0 {
-		return "", fmt.Errorf("not found volume %d in %s", fid.VolumeId, fileId)
+		return nil, fmt.Errorf("not found volume %d in %s", fid.VolumeId, fileId)
 	}
-	return fmt.Sprintf("http://%s/%s", locations[0].Url, fileId), nil
+	for _, loc := range locations {
+		targetUrls = append(targetUrls, fmt.Sprintf("http://%s/%s", loc.Url, fileId))
+	}
+	return
 }
 
 func (fs *FilerServer) CreateEntry(ctx context.Context, req *filer_pb.CreateEntryRequest) (resp *filer_pb.CreateEntryResponse, err error) {
@@ -154,17 +161,13 @@ func (fs *FilerServer) CreateEntry(ctx context.Context, req *filer_pb.CreateEntr
 		return &filer_pb.CreateEntryResponse{}, fmt.Errorf("CreateEntry cleanupChunks %s %s: %v", req.Directory, req.Entry.Name, err2)
 	}
 
-	if req.Entry.Attributes == nil {
-		glog.V(3).Infof("CreateEntry %s: nil attributes", filepath.Join(req.Directory, req.Entry.Name))
-		resp.Error = fmt.Sprintf("can not create entry with empty attributes")
-		return
-	}
-
 	createErr := fs.filer.CreateEntry(ctx, &filer.Entry{
-		FullPath: util.JoinPath(req.Directory, req.Entry.Name),
-		Attr:     filer.PbToEntryAttribute(req.Entry.Attributes),
-		Chunks:   chunks,
-		Extended: req.Entry.Extended,
+		FullPath:        util.JoinPath(req.Directory, req.Entry.Name),
+		Attr:            filer.PbToEntryAttribute(req.Entry.Attributes),
+		Chunks:          chunks,
+		Extended:        req.Entry.Extended,
+		HardLinkId:      filer.HardLinkId(req.Entry.HardLinkId),
+		HardLinkCounter: req.Entry.HardLinkCounter,
 	}, req.OExcl, req.IsFromOtherCluster, req.Signatures)
 
 	if createErr == nil {
@@ -193,10 +196,12 @@ func (fs *FilerServer) UpdateEntry(ctx context.Context, req *filer_pb.UpdateEntr
 	}
 
 	newEntry := &filer.Entry{
-		FullPath: util.JoinPath(req.Directory, req.Entry.Name),
-		Attr:     entry.Attr,
-		Extended: req.Entry.Extended,
-		Chunks:   chunks,
+		FullPath:        util.JoinPath(req.Directory, req.Entry.Name),
+		Attr:            entry.Attr,
+		Extended:        req.Entry.Extended,
+		Chunks:          chunks,
+		HardLinkId:      filer.HardLinkId(req.Entry.HardLinkId),
+		HardLinkCounter: req.Entry.HardLinkCounter,
 	}
 
 	glog.V(3).Infof("updating %s: %+v, chunks %d: %v => %+v, chunks %d: %v, extended: %v => %v",
@@ -225,11 +230,12 @@ func (fs *FilerServer) UpdateEntry(ctx context.Context, req *filer_pb.UpdateEntr
 
 	if err = fs.filer.UpdateEntry(ctx, entry, newEntry); err == nil {
 		fs.filer.DeleteChunks(garbage)
+
+		fs.filer.NotifyUpdateEvent(ctx, entry, newEntry, true, req.IsFromOtherCluster, req.Signatures)
+
 	} else {
 		glog.V(3).Infof("UpdateEntry %s: %v", filepath.Join(req.Directory, req.Entry.Name), err)
 	}
-
-	fs.filer.NotifyUpdateEvent(ctx, entry, newEntry, true, req.IsFromOtherCluster, req.Signatures)
 
 	return &filer_pb.UpdateEntryResponse{}, err
 }
@@ -250,15 +256,17 @@ func (fs *FilerServer) cleanupChunks(existingEntry *filer.Entry, newEntry *filer
 	chunks, coveredChunks := filer.CompactFileChunks(fs.lookupFileId, nonManifestChunks)
 	garbage = append(garbage, coveredChunks...)
 
-	chunks, err = filer.MaybeManifestize(fs.saveAsChunk(
-		newEntry.Attributes.Replication,
-		newEntry.Attributes.Collection,
-		"",
-		needle.SecondsToTTL(newEntry.Attributes.TtlSec),
-		false), chunks)
-	if err != nil {
-		// not good, but should be ok
-		glog.V(0).Infof("MaybeManifestize: %v", err)
+	if newEntry.Attributes != nil {
+		chunks, err = filer.MaybeManifestize(fs.saveAsChunk(
+			newEntry.Attributes.Replication,
+			newEntry.Attributes.Collection,
+			"",
+			needle.SecondsToTTL(newEntry.Attributes.TtlSec),
+			false), chunks)
+		if err != nil {
+			// not good, but should be ok
+			glog.V(0).Infof("MaybeManifestize: %v", err)
+		}
 	}
 
 	chunks = append(chunks, manifestChunks...)
@@ -373,6 +381,28 @@ func (fs *FilerServer) AssignVolume(ctx context.Context, req *filer_pb.AssignVol
 		Collection:  collection,
 		Replication: replication,
 	}, nil
+}
+
+func (fs *FilerServer) CollectionList(ctx context.Context, req *filer_pb.CollectionListRequest) (resp *filer_pb.CollectionListResponse, err error) {
+
+	glog.V(4).Infof("CollectionList %v", req)
+	resp = &filer_pb.CollectionListResponse{}
+
+	err = fs.filer.MasterClient.WithClient(func(client master_pb.SeaweedClient) error {
+		masterResp, err := client.CollectionList(context.Background(), &master_pb.CollectionListRequest{
+			IncludeNormalVolumes: req.IncludeNormalVolumes,
+			IncludeEcVolumes:     req.IncludeEcVolumes,
+		})
+		if err != nil {
+			return err
+		}
+		for _, c := range masterResp.Collections {
+			resp.Collections = append(resp.Collections, &filer_pb.Collection{Name: c.Name})
+		}
+		return nil
+	})
+
+	return
 }
 
 func (fs *FilerServer) DeleteCollection(ctx context.Context, req *filer_pb.DeleteCollectionRequest) (resp *filer_pb.DeleteCollectionResponse, err error) {

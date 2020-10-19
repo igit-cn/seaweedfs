@@ -2,13 +2,13 @@ package meta_cache
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 
 	"github.com/chrislusf/seaweedfs/weed/filer"
 	"github.com/chrislusf/seaweedfs/weed/filer/leveldb"
 	"github.com/chrislusf/seaweedfs/weed/glog"
-	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
 	"github.com/chrislusf/seaweedfs/weed/util"
 	"github.com/chrislusf/seaweedfs/weed/util/bounded_tree"
 )
@@ -17,21 +17,21 @@ import (
 // e.g. fill fileId field for chunks
 
 type MetaCache struct {
-	actualStore filer.FilerStore
+	localStore filer.VirtualFilerStore
 	sync.RWMutex
 	visitedBoundary *bounded_tree.BoundedTree
 	uidGidMapper    *UidGidMapper
 }
 
-func NewMetaCache(dbFolder string, uidGidMapper *UidGidMapper) *MetaCache {
+func NewMetaCache(dbFolder string, baseDir util.FullPath, uidGidMapper *UidGidMapper) *MetaCache {
 	return &MetaCache{
-		actualStore:     openMetaStore(dbFolder),
-		visitedBoundary: bounded_tree.NewBoundedTree(),
+		localStore:      openMetaStore(dbFolder),
+		visitedBoundary: bounded_tree.NewBoundedTree(baseDir),
 		uidGidMapper:    uidGidMapper,
 	}
 }
 
-func openMetaStore(dbFolder string) filer.FilerStore {
+func openMetaStore(dbFolder string) filer.VirtualFilerStore {
 
 	os.RemoveAll(dbFolder)
 	os.MkdirAll(dbFolder, 0755)
@@ -45,7 +45,7 @@ func openMetaStore(dbFolder string) filer.FilerStore {
 		glog.Fatalf("Failed to initialize metadata cache store for %s: %+v", store.GetName(), err)
 	}
 
-	return store
+	return filer.NewFilerStoreWrapper(store)
 
 }
 
@@ -56,8 +56,7 @@ func (mc *MetaCache) InsertEntry(ctx context.Context, entry *filer.Entry) error 
 }
 
 func (mc *MetaCache) doInsertEntry(ctx context.Context, entry *filer.Entry) error {
-	filer_pb.BeforeEntrySerialization(entry.Chunks)
-	return mc.actualStore.InsertEntry(ctx, entry)
+	return mc.localStore.InsertEntry(ctx, entry)
 }
 
 func (mc *MetaCache) AtomicUpdateEntryFromFiler(ctx context.Context, oldPath util.FullPath, newEntry *filer.Entry) error {
@@ -71,7 +70,7 @@ func (mc *MetaCache) AtomicUpdateEntryFromFiler(ctx context.Context, oldPath uti
 				// skip the unnecessary deletion
 				// leave the update to the following InsertEntry operation
 			} else {
-				if err := mc.actualStore.DeleteEntry(ctx, oldPath); err != nil {
+				if err := mc.localStore.DeleteEntry(ctx, oldPath); err != nil {
 					return err
 				}
 			}
@@ -83,7 +82,7 @@ func (mc *MetaCache) AtomicUpdateEntryFromFiler(ctx context.Context, oldPath uti
 	if newEntry != nil {
 		newDir, _ := newEntry.DirAndName()
 		if mc.visitedBoundary.HasVisited(util.FullPath(newDir)) {
-			if err := mc.actualStore.InsertEntry(ctx, newEntry); err != nil {
+			if err := mc.localStore.InsertEntry(ctx, newEntry); err != nil {
 				return err
 			}
 		}
@@ -94,39 +93,40 @@ func (mc *MetaCache) AtomicUpdateEntryFromFiler(ctx context.Context, oldPath uti
 func (mc *MetaCache) UpdateEntry(ctx context.Context, entry *filer.Entry) error {
 	mc.Lock()
 	defer mc.Unlock()
-	filer_pb.BeforeEntrySerialization(entry.Chunks)
-	return mc.actualStore.UpdateEntry(ctx, entry)
+	return mc.localStore.UpdateEntry(ctx, entry)
 }
 
 func (mc *MetaCache) FindEntry(ctx context.Context, fp util.FullPath) (entry *filer.Entry, err error) {
 	mc.RLock()
 	defer mc.RUnlock()
-	entry, err = mc.actualStore.FindEntry(ctx, fp)
+	entry, err = mc.localStore.FindEntry(ctx, fp)
 	if err != nil {
 		return nil, err
 	}
 	mc.mapIdFromFilerToLocal(entry)
-	filer_pb.AfterEntryDeserialization(entry.Chunks)
 	return
 }
 
 func (mc *MetaCache) DeleteEntry(ctx context.Context, fp util.FullPath) (err error) {
 	mc.Lock()
 	defer mc.Unlock()
-	return mc.actualStore.DeleteEntry(ctx, fp)
+	return mc.localStore.DeleteEntry(ctx, fp)
 }
 
 func (mc *MetaCache) ListDirectoryEntries(ctx context.Context, dirPath util.FullPath, startFileName string, includeStartFile bool, limit int) ([]*filer.Entry, error) {
 	mc.RLock()
 	defer mc.RUnlock()
 
-	entries, err := mc.actualStore.ListDirectoryEntries(ctx, dirPath, startFileName, includeStartFile, limit)
+	if !mc.visitedBoundary.HasVisited(dirPath) {
+		return nil, fmt.Errorf("unsynchronized dir: %v", dirPath)
+	}
+
+	entries, err := mc.localStore.ListDirectoryEntries(ctx, dirPath, startFileName, includeStartFile, limit)
 	if err != nil {
 		return nil, err
 	}
 	for _, entry := range entries {
 		mc.mapIdFromFilerToLocal(entry)
-		filer_pb.AfterEntryDeserialization(entry.Chunks)
 	}
 	return entries, err
 }
@@ -134,7 +134,7 @@ func (mc *MetaCache) ListDirectoryEntries(ctx context.Context, dirPath util.Full
 func (mc *MetaCache) Shutdown() {
 	mc.Lock()
 	defer mc.Unlock()
-	mc.actualStore.Shutdown()
+	mc.localStore.Shutdown()
 }
 
 func (mc *MetaCache) mapIdFromFilerToLocal(entry *filer.Entry) {

@@ -25,6 +25,7 @@ import (
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/pb/volume_server_pb"
 	"github.com/chrislusf/seaweedfs/weed/server"
+	stats_collect "github.com/chrislusf/seaweedfs/weed/stats"
 	"github.com/chrislusf/seaweedfs/weed/storage"
 	"github.com/chrislusf/seaweedfs/weed/util"
 )
@@ -56,6 +57,7 @@ type VolumeServerOptions struct {
 	minFreeSpacePercents  []float32
 	pprof                 *bool
 	preStopSeconds        *int
+	metricsHttpPort       *int
 	// pulseSeconds          *int
 }
 
@@ -80,6 +82,7 @@ func init() {
 	v.compactionMBPerSecond = cmdVolume.Flag.Int("compactionMBps", 0, "limit background compaction or copying speed in mega bytes per second")
 	v.fileSizeLimitMB = cmdVolume.Flag.Int("fileSizeLimitMB", 1024, "limit file size to avoid out of memory")
 	v.pprof = cmdVolume.Flag.Bool("pprof", false, "enable pprof http handlers. precludes --memprofile and --cpuprofile")
+	v.metricsHttpPort = cmdVolume.Flag.Int("metricsPort", 0, "Prometheus metrics listen port")
 }
 
 var cmdVolume = &Command{
@@ -109,6 +112,8 @@ func runVolume(cmd *Command, args []string) bool {
 		grace.SetupProfiling(*v.cpuProfile, *v.memProfile)
 	}
 
+	go stats_collect.StartMetricsServer(*v.metricsHttpPort)
+
 	v.startVolumeServer(*volumeFolders, *maxVolumeCounts, *volumeWhiteListOption, *minFreeSpacePercent)
 
 	return true
@@ -131,6 +136,11 @@ func (v VolumeServerOptions) startVolumeServer(volumeFolders, maxVolumeCounts, v
 			v.folderMaxLimits = append(v.folderMaxLimits, max)
 		} else {
 			glog.Fatalf("The max specified in -max not a valid number %s", maxString)
+		}
+	}
+	if len(v.folderMaxLimits) == 1 && len(v.folders) > 1 {
+		for i := 0; i < len(v.folders)-1; i++ {
+			v.folderMaxLimits = append(v.folderMaxLimits, v.folderMaxLimits[0])
 		}
 	}
 	if len(v.folders) != len(v.folderMaxLimits) {

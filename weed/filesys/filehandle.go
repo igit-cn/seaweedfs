@@ -77,9 +77,13 @@ func (fh *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fus
 		totalRead = max(maxStop-req.Offset, totalRead)
 	}
 
+	if err == io.EOF {
+		err = nil
+	}
+
 	if err != nil {
 		glog.Warningf("file handle read %s %d: %v", fh.f.fullpath(), totalRead, err)
-		return nil
+		return fuse.EIO
 	}
 
 	if totalRead > int64(len(buff)) {
@@ -122,11 +126,7 @@ func (fh *FileHandle) readFromChunks(buff []byte, offset int64) (int64, error) {
 
 	totalRead, err := fh.f.reader.ReadAt(buff, offset)
 
-	if err == io.EOF {
-		err = nil
-	}
-
-	if err != nil {
+	if err != nil && err != io.EOF{
 		glog.Errorf("file handle read %s: %v", fh.f.fullpath(), err)
 	}
 
@@ -148,11 +148,7 @@ func (fh *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *f
 	fh.f.entry.Attributes.FileSize = uint64(max(req.Offset+int64(len(data)), int64(fh.f.entry.Attributes.FileSize)))
 	glog.V(4).Infof("%v write [%d,%d) %d", fh.f.fullpath(), req.Offset, req.Offset+int64(len(req.Data)), len(req.Data))
 
-	chunks, err := fh.dirtyPages.AddPage(req.Offset, data)
-	if err != nil {
-		glog.Errorf("%v write fh %d: [%d,%d): %v", fh.f.fullpath(), fh.handle, req.Offset, req.Offset+int64(len(data)), err)
-		return fuse.EIO
-	}
+	fh.dirtyPages.AddPage(req.Offset, data)
 
 	resp.Size = len(data)
 
@@ -162,12 +158,7 @@ func (fh *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *f
 		fh.f.dirtyMetadata = true
 	}
 
-	if len(chunks) > 0 {
-
-		fh.f.addChunks(chunks)
-
-		fh.f.dirtyMetadata = true
-	}
+	fh.f.dirtyMetadata = true
 
 	return nil
 }
@@ -188,9 +179,15 @@ func (fh *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) err
 	}
 
 	if fh.f.isOpen == 0 {
-		fh.doFlush(ctx, req.Header)
+		if err := fh.doFlush(ctx, req.Header); err != nil {
+			glog.Errorf("Release doFlush %s: %v", fh.f.Name, err)
+		}
 		fh.f.wfs.ReleaseHandle(fh.f.fullpath(), fuse.HandleID(fh.handle))
 	}
+
+	// stop the goroutine
+	fh.dirtyPages.chunkSaveErrChanClosed = true
+	close(fh.dirtyPages.chunkSaveErrChan)
 
 	return nil
 }
@@ -204,20 +201,24 @@ func (fh *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 }
 
 func (fh *FileHandle) doFlush(ctx context.Context, header fuse.Header) error {
-	// fflush works at fh level
+	// flush works at fh level
 	// send the data to the OS
 	glog.V(4).Infof("doFlush %s fh %d", fh.f.fullpath(), fh.handle)
 
-	chunks, err := fh.dirtyPages.saveExistingPagesToStorage()
+	fh.dirtyPages.saveExistingPagesToStorage()
+
+	var err error
+	go func() {
+		for t := range fh.dirtyPages.chunkSaveErrChan {
+			if t != nil {
+				err = t
+			}
+		}
+	}()
+	fh.dirtyPages.writeWaitGroup.Wait()
+
 	if err != nil {
-		glog.Errorf("flush %s: %v", fh.f.fullpath(), err)
-		return fuse.EIO
-	}
-
-	if len(chunks) > 0 {
-
-		fh.f.addChunks(chunks)
-		fh.f.dirtyMetadata = true
+		return err
 	}
 
 	if !fh.f.dirtyMetadata {

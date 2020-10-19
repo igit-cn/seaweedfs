@@ -2,6 +2,7 @@ package command
 
 import (
 	"fmt"
+	stats_collect "github.com/chrislusf/seaweedfs/weed/stats"
 	"os"
 	"runtime"
 	"runtime/pprof"
@@ -56,6 +57,7 @@ var (
 	volumeDataFolders         = cmdServer.Flag.String("dir", os.TempDir(), "directories to store data files. dir[,dir]...")
 	volumeMaxDataVolumeCounts = cmdServer.Flag.String("volume.max", "8", "maximum numbers of volumes, count[,count]... If set to zero, the limit will be auto configured.")
 	volumeMinFreeSpacePercent = cmdServer.Flag.String("volume.minFreeSpacePercent", "1", "minimum free disk space (default to 1%). Low disk space will mark all volumes as ReadOnly.")
+	serverMetricsHttpPort     = cmdServer.Flag.Int("metricsPort", 0, "Prometheus metrics listen port")
 
 	// pulseSeconds              = cmdServer.Flag.Int("pulseSeconds", 5, "number of seconds between heartbeats")
 	isStartingFiler     = cmdServer.Flag.Bool("filer", false, "whether to start filer")
@@ -79,11 +81,12 @@ func init() {
 	masterOptions.garbageThreshold = cmdServer.Flag.Float64("garbageThreshold", 0.3, "threshold to vacuum and reclaim spaces")
 	masterOptions.metricsAddress = cmdServer.Flag.String("metrics.address", "", "Prometheus gateway address")
 	masterOptions.metricsIntervalSec = cmdServer.Flag.Int("metrics.intervalSeconds", 15, "Prometheus push interval in seconds")
+	masterOptions.raftResumeState = cmdServer.Flag.Bool("resumeState", false, "resume previous state on start master server")
 
 	filerOptions.collection = cmdServer.Flag.String("filer.collection", "", "all data will be stored in this collection")
 	filerOptions.port = cmdServer.Flag.Int("filer.port", 8888, "filer server http listen port")
 	filerOptions.publicPort = cmdServer.Flag.Int("filer.port.public", 0, "filer server public http listen port")
-	filerOptions.defaultReplicaPlacement = cmdServer.Flag.String("filer.defaultReplicaPlacement", "", "Default replication type if not specified during runtime.")
+	filerOptions.defaultReplicaPlacement = cmdServer.Flag.String("filer.defaultReplicaPlacement", "", "default replication type. If not specified, use master setting.")
 	filerOptions.disableDirListing = cmdServer.Flag.Bool("filer.disableDirListing", false, "turn off directory listing")
 	filerOptions.maxMB = cmdServer.Flag.Int("filer.maxMB", 32, "split files larger than the limit")
 	filerOptions.dirListingLimit = cmdServer.Flag.Int("filer.dirListLimit", 1000, "limit sub dir listing size")
@@ -136,6 +139,7 @@ func runServer(cmd *Command, args []string) bool {
 	peers := strings.Join(peerList, ",")
 	masterOptions.peers = &peers
 
+	// ip address
 	masterOptions.ip = serverIp
 	masterOptions.ipBind = serverBindIp
 	filerOptions.masters = &peers
@@ -162,11 +166,8 @@ func runServer(cmd *Command, args []string) bool {
 	s3Options.filer = &filerAddress
 	msgBrokerOptions.filer = &filerAddress
 
-	if *filerOptions.defaultReplicaPlacement == "" {
-		*filerOptions.defaultReplicaPlacement = *masterOptions.defaultReplication
-	}
-
 	runtime.GOMAXPROCS(runtime.NumCPU())
+	go stats_collect.StartMetricsServer(*serverMetricsHttpPort)
 
 	folders := strings.Split(*volumeDataFolders, ",")
 

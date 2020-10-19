@@ -88,18 +88,19 @@ func NewSeaweedFileSystem(option *Option) *WFS {
 	cacheUniqueId := util.Md5String([]byte(option.FilerGrpcAddress + option.FilerMountRootPath + util.Version()))[0:4]
 	cacheDir := path.Join(option.CacheDir, cacheUniqueId)
 	if option.CacheSizeMB > 0 {
-		os.MkdirAll(cacheDir, 0755)
-		wfs.chunkCache = chunk_cache.NewTieredChunkCache(256, cacheDir, option.CacheSizeMB)
+		os.MkdirAll(cacheDir, os.FileMode(0777)&^option.Umask)
+		wfs.chunkCache = chunk_cache.NewTieredChunkCache(256, cacheDir, option.CacheSizeMB, 1024*1024)
 	}
 
-	wfs.metaCache = meta_cache.NewMetaCache(path.Join(cacheDir, "meta"), option.UidGidMapper)
+	wfs.metaCache = meta_cache.NewMetaCache(path.Join(cacheDir, "meta"), util.FullPath(option.FilerMountRootPath), option.UidGidMapper)
 	startTime := time.Now()
 	go meta_cache.SubscribeMetaEvents(wfs.metaCache, wfs.signature, wfs, wfs.option.FilerMountRootPath, startTime.UnixNano())
 	grace.OnInterrupt(func() {
 		wfs.metaCache.Shutdown()
 	})
 
-	wfs.root = &Dir{name: wfs.option.FilerMountRootPath, wfs: wfs}
+	entry, _ := filer_pb.GetEntry(wfs, util.FullPath(wfs.option.FilerMountRootPath))
+	wfs.root = &Dir{name: wfs.option.FilerMountRootPath, wfs: wfs, entry: entry}
 	wfs.fsNodeCache = newFsCache(wfs.root)
 
 	return wfs
@@ -208,8 +209,14 @@ func (wfs *WFS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.
 }
 
 func (wfs *WFS) mapPbIdFromFilerToLocal(entry *filer_pb.Entry) {
+	if entry.Attributes == nil {
+		return
+	}
 	entry.Attributes.Uid, entry.Attributes.Gid = wfs.option.UidGidMapper.FilerToLocal(entry.Attributes.Uid, entry.Attributes.Gid)
 }
 func (wfs *WFS) mapPbIdFromLocalToFiler(entry *filer_pb.Entry) {
+	if entry.Attributes == nil {
+		return
+	}
 	entry.Attributes.Uid, entry.Attributes.Gid = wfs.option.UidGidMapper.LocalToFiler(entry.Attributes.Uid, entry.Attributes.Gid)
 }

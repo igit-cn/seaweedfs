@@ -112,6 +112,12 @@ func (s3a *S3ApiServer) DeleteObjectHandler(w http.ResponseWriter, r *http.Reque
 
 	bucket, object := getBucketAndObject(r)
 
+	response, _ := s3a.listFilerEntries(bucket, object, 1, "", "/")
+	if len(response.Contents) != 0 && strings.HasSuffix(object, "/") {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	destUrl := fmt.Sprintf("http://%s%s/%s%s?recursive=true",
 		s3a.option.Filer, s3a.option.BucketsPath, bucket, object)
 
@@ -121,7 +127,6 @@ func (s3a *S3ApiServer) DeleteObjectHandler(w http.ResponseWriter, r *http.Reque
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-
 }
 
 // / ObjectIdentifier carries key name for the object to delete.
@@ -178,6 +183,11 @@ func (s3a *S3ApiServer) DeleteMultipleObjectsHandler(w http.ResponseWriter, r *h
 	s3a.WithFilerClient(func(client filer_pb.SeaweedFilerClient) error {
 
 		for _, object := range deleteObjects.Objects {
+			response, _ := s3a.listFilerEntries(bucket, object.ObjectName, 1, "", "/")
+			if len(response.Contents) != 0 && strings.HasSuffix(object.ObjectName, "/") {
+				continue
+			}
+
 			lastSeparator := strings.LastIndex(object.ObjectName, "/")
 			parentDirectoryPath, entryName, isDeleteData, isRecursive := "/", object.ObjectName, true, true
 			if lastSeparator > 0 && lastSeparator+1 < len(object.ObjectName) {
@@ -210,6 +220,15 @@ func (s3a *S3ApiServer) DeleteMultipleObjectsHandler(w http.ResponseWriter, r *h
 
 }
 
+var passThroughHeaders = []string{
+	"response-cache-control",
+	"response-content-disposition",
+	"response-content-encoding",
+	"response-content-language",
+	"response-content-type",
+	"response-expires",
+}
+
 func (s3a *S3ApiServer) proxyToFiler(w http.ResponseWriter, r *http.Request, destUrl string, responseFn func(proxyResponse *http.Response, w http.ResponseWriter)) {
 
 	glog.V(2).Infof("s3 proxying %s to %s", r.Method, destUrl)
@@ -226,6 +245,19 @@ func (s3a *S3ApiServer) proxyToFiler(w http.ResponseWriter, r *http.Request, des
 	proxyReq.Header.Set("X-Forwarded-For", r.RemoteAddr)
 
 	for header, values := range r.Header {
+		// handle s3 related headers
+		passed := false
+		for _, h := range passThroughHeaders {
+			if strings.ToLower(header) == h && len(values) > 0 {
+				proxyReq.Header.Add(header[len("response-"):], values[0])
+				passed = true
+				break
+			}
+		}
+		if passed {
+			continue
+		}
+		// handle other headers
 		for _, value := range values {
 			proxyReq.Header.Add(header, value)
 		}
@@ -233,7 +265,7 @@ func (s3a *S3ApiServer) proxyToFiler(w http.ResponseWriter, r *http.Request, des
 
 	resp, postErr := client.Do(proxyReq)
 
-	if resp.ContentLength == -1 {
+	if resp.ContentLength == -1 && !strings.HasSuffix(destUrl, "/") {
 		writeErrorResponse(w, s3err.ErrNoSuchKey, r.URL)
 		return
 	}
@@ -248,6 +280,7 @@ func (s3a *S3ApiServer) proxyToFiler(w http.ResponseWriter, r *http.Request, des
 	responseFn(resp, w)
 
 }
+
 func passThroughResponse(proxyResponse *http.Response, w http.ResponseWriter) {
 	for k, v := range proxyResponse.Header {
 		w.Header()[k] = v

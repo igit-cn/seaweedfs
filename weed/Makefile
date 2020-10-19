@@ -16,7 +16,7 @@ debug_shell:
 
 debug_mount:
 	go build -gcflags="all=-N -l"
-	dlv --listen=:2345 --headless=true --api-version=2 --accept-multiclient exec weed -- mount -dir=~/tmp/mm
+	dlv --listen=:2345 --headless=true --api-version=2 --accept-multiclient exec weed -- mount -dir=~/tmp/mm -cacheCapacityMB=0 -filer.path=/buckets
 
 debug_server:
 	go build -gcflags="all=-N -l"
@@ -25,3 +25,7 @@ debug_server:
 debug_volume:
 	go build -gcflags="all=-N -l"
 	dlv --listen=:2345 --headless=true --api-version=2 --accept-multiclient exec weed -- volume -dir=/Volumes/mobile_disk/100 -port 8564 -max=30 -preStopSeconds=2
+
+debug_webdav:
+	go build -gcflags="all=-N -l"
+	dlv --listen=:2345 --headless=true --api-version=2 --accept-multiclient exec weed -- -v=4 webdav

@@ -234,7 +234,11 @@ func (dir *Dir) Lookup(ctx context.Context, req *fuse.LookupRequest, resp *fuse.
 
 	fullFilePath := util.NewFullPath(dir.FullPath(), req.Name)
 	dirPath := util.FullPath(dir.FullPath())
-	meta_cache.EnsureVisited(dir.wfs.metaCache, dir.wfs, util.FullPath(dirPath))
+	visitErr := meta_cache.EnsureVisited(dir.wfs.metaCache, dir.wfs, dirPath)
+	if visitErr != nil {
+		glog.Errorf("dir Lookup %s: %v", dirPath, visitErr)
+		return nil, fuse.EIO
+	}
 	cachedEntry, cacheErr := dir.wfs.metaCache.FindEntry(context.Background(), fullFilePath)
 	if cacheErr == filer_pb.ErrNotFound {
 		return nil, fuse.ENOENT
@@ -267,6 +271,9 @@ func (dir *Dir) Lookup(ctx context.Context, req *fuse.LookupRequest, resp *fuse.
 		resp.Attr.Mode = os.FileMode(entry.Attributes.FileMode)
 		resp.Attr.Gid = entry.Attributes.Gid
 		resp.Attr.Uid = entry.Attributes.Uid
+		if entry.HardLinkCounter > 0 {
+			resp.Attr.Nlink = uint32(entry.HardLinkCounter)
+		}
 
 		return node, nil
 	}
@@ -293,7 +300,10 @@ func (dir *Dir) ReadDirAll(ctx context.Context) (ret []fuse.Dirent, err error) {
 	}
 
 	dirPath := util.FullPath(dir.FullPath())
-	meta_cache.EnsureVisited(dir.wfs.metaCache, dir.wfs, dirPath)
+	if err = meta_cache.EnsureVisited(dir.wfs.metaCache, dir.wfs, dirPath); err != nil {
+		glog.Errorf("dir ReadDirAll %s: %v", dirPath, err)
+		return nil, fuse.EIO
+	}
 	listedEntries, listErr := dir.wfs.metaCache.ListDirectoryEntries(context.Background(), util.FullPath(dir.FullPath()), "", false, int(math.MaxInt32))
 	if listErr != nil {
 		glog.Errorf("list meta cache: %v", listErr)
@@ -328,7 +338,8 @@ func (dir *Dir) removeOneFile(req *fuse.RemoveRequest) error {
 
 	// first, ensure the filer store can correctly delete
 	glog.V(3).Infof("remove file: %v", req)
-	err = filer_pb.Remove(dir.wfs, dir.FullPath(), req.Name, false, false, false, false, []int32{dir.wfs.signature})
+	isDeleteData := entry.HardLinkCounter <= 1
+	err = filer_pb.Remove(dir.wfs, dir.FullPath(), req.Name, isDeleteData, false, false, false, []int32{dir.wfs.signature})
 	if err != nil {
 		glog.V(3).Infof("not found remove file %s/%s: %v", dir.FullPath(), req.Name, err)
 		return fuse.ENOENT
@@ -339,7 +350,9 @@ func (dir *Dir) removeOneFile(req *fuse.RemoveRequest) error {
 	dir.wfs.fsNodeCache.DeleteFsNode(filePath)
 
 	// delete the chunks last
-	dir.wfs.deleteFileChunks(entry.Chunks)
+	if isDeleteData {
+		dir.wfs.deleteFileChunks(entry.Chunks)
+	}
 
 	return nil
 
@@ -348,7 +361,8 @@ func (dir *Dir) removeOneFile(req *fuse.RemoveRequest) error {
 func (dir *Dir) removeFolder(req *fuse.RemoveRequest) error {
 
 	glog.V(3).Infof("remove directory entry: %v", req)
-	err := filer_pb.Remove(dir.wfs, dir.FullPath(), req.Name, true, false, false, false, []int32{dir.wfs.signature})
+	ignoreRecursiveErr := true // ignore recursion error since the OS should manage it
+	err := filer_pb.Remove(dir.wfs, dir.FullPath(), req.Name, true, false, ignoreRecursiveErr, false, []int32{dir.wfs.signature})
 	if err != nil {
 		glog.V(0).Infof("remove %s/%s: %v", dir.FullPath(), req.Name, err)
 		if strings.Contains(err.Error(), "non-empty") {

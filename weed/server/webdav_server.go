@@ -100,7 +100,7 @@ type WebDavFile struct {
 
 func NewWebDavFileSystem(option *WebDavOption) (webdav.FileSystem, error) {
 
-	chunkCache := chunk_cache.NewTieredChunkCache(256, option.CacheDir, option.CacheSizeMB)
+	chunkCache := chunk_cache.NewTieredChunkCache(256, option.CacheDir, option.CacheSizeMB, 1024*1024)
 	return &WebDavFileSystem{
 		option:     option,
 		chunkCache: chunkCache,
@@ -118,8 +118,8 @@ func (fs *WebDavFileSystem) WithFilerClient(fn func(filer_pb.SeaweedFilerClient)
 	}, fs.option.FilerGrpcAddress, fs.option.GrpcDialOption)
 
 }
-func (fs *WebDavFileSystem) AdjustedUrl(hostAndPort string) string {
-	return hostAndPort
+func (fs *WebDavFileSystem) AdjustedUrl(location *filer_pb.Location) string {
+	return location.Url
 }
 
 func clearName(name string) (string, error) {
@@ -489,11 +489,7 @@ func (f *WebDavFile) Read(p []byte) (readSize int, err error) {
 	glog.V(3).Infof("WebDavFileSystem.Read %v: [%d,%d)", f.name, f.off, f.off+int64(readSize))
 	f.off += int64(readSize)
 
-	if err == io.EOF {
-		err = nil
-	}
-
-	if err != nil {
+	if err != nil && err != io.EOF {
 		glog.Errorf("file read %s: %v", f.name, err)
 	}
 
