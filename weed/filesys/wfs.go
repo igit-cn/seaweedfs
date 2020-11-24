@@ -31,6 +31,7 @@ type Option struct {
 	Replication        string
 	TtlSec             int32
 	ChunkSizeLimit     int64
+	ConcurrentWriters  int
 	CacheDir           string
 	CacheSizeMB        int64
 	DataCenter         string
@@ -68,6 +69,9 @@ type WFS struct {
 	chunkCache *chunk_cache.TieredChunkCache
 	metaCache  *meta_cache.MetaCache
 	signature  int32
+
+	// throttle writers
+	concurrentWriters *util.LimitedConcurrentExecutor
 }
 type statsCache struct {
 	filer_pb.StatisticsResponse
@@ -92,7 +96,14 @@ func NewSeaweedFileSystem(option *Option) *WFS {
 		wfs.chunkCache = chunk_cache.NewTieredChunkCache(256, cacheDir, option.CacheSizeMB, 1024*1024)
 	}
 
-	wfs.metaCache = meta_cache.NewMetaCache(path.Join(cacheDir, "meta"), util.FullPath(option.FilerMountRootPath), option.UidGidMapper)
+	wfs.metaCache = meta_cache.NewMetaCache(path.Join(cacheDir, "meta"), util.FullPath(option.FilerMountRootPath), option.UidGidMapper, func(filePath util.FullPath) {
+		fsNode := wfs.fsNodeCache.GetFsNode(filePath)
+		if fsNode != nil {
+			if file, ok := fsNode.(*File); ok {
+				file.clearEntry()
+			}
+		}
+	})
 	startTime := time.Now()
 	go meta_cache.SubscribeMetaEvents(wfs.metaCache, wfs.signature, wfs, wfs.option.FilerMountRootPath, startTime.UnixNano())
 	grace.OnInterrupt(func() {
@@ -102,6 +113,10 @@ func NewSeaweedFileSystem(option *Option) *WFS {
 	entry, _ := filer_pb.GetEntry(wfs, util.FullPath(wfs.option.FilerMountRootPath))
 	wfs.root = &Dir{name: wfs.option.FilerMountRootPath, wfs: wfs, entry: entry}
 	wfs.fsNodeCache = newFsCache(wfs.root)
+
+	if wfs.option.ConcurrentWriters > 0 {
+		wfs.concurrentWriters = util.NewLimitedConcurrentExecutor(wfs.option.ConcurrentWriters)
+	}
 
 	return wfs
 }
@@ -119,10 +134,12 @@ func (wfs *WFS) AcquireHandle(file *File, uid, gid uint32) (fileHandle *FileHand
 	defer wfs.handlesLock.Unlock()
 
 	inodeId := file.fullpath().AsInode()
-	existingHandle, found := wfs.handles[inodeId]
-	if found && existingHandle != nil {
-		file.isOpen++
-		return existingHandle
+	if file.isOpen > 0 {
+		existingHandle, found := wfs.handles[inodeId]
+		if found && existingHandle != nil {
+			file.isOpen++
+			return existingHandle
+		}
 	}
 
 	fileHandle = newFileHandle(file, uid, gid)

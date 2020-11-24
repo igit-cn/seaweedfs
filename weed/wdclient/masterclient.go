@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"time"
 
+	"github.com/chrislusf/seaweedfs/weed/util"
 	"google.golang.org/grpc"
 
 	"github.com/chrislusf/seaweedfs/weed/glog"
@@ -23,14 +24,14 @@ type MasterClient struct {
 	vidMap
 }
 
-func NewMasterClient(grpcDialOption grpc.DialOption, clientType string, clientHost string, clientGrpcPort uint32, masters []string) *MasterClient {
+func NewMasterClient(grpcDialOption grpc.DialOption, clientType string, clientHost string, clientGrpcPort uint32, clientDataCenter string, masters []string) *MasterClient {
 	return &MasterClient{
 		clientType:     clientType,
 		clientHost:     clientHost,
 		grpcPort:       clientGrpcPort,
 		masters:        masters,
 		grpcDialOption: grpcDialOption,
-		vidMap:         newVidMap(),
+		vidMap:         newVidMap(clientDataCenter),
 	}
 }
 
@@ -88,7 +89,7 @@ func (mc *MasterClient) tryAllMasters() {
 		}
 
 		mc.currentMaster = ""
-		mc.vidMap = newVidMap()
+		mc.vidMap = newVidMap("")
 	}
 }
 
@@ -129,8 +130,9 @@ func (mc *MasterClient) tryConnectToMaster(master string) (nextHintedLeader stri
 
 			// process new volume location
 			loc := Location{
-				Url:       volumeLocation.Url,
-				PublicUrl: volumeLocation.PublicUrl,
+				Url:        volumeLocation.Url,
+				PublicUrl:  volumeLocation.PublicUrl,
+				DataCenter: volumeLocation.DataCenter,
 			}
 			for _, newVid := range volumeLocation.NewVids {
 				glog.V(1).Infof("%s: %s masterClient adds volume %d", mc.clientType, loc.Url, newVid)
@@ -150,10 +152,12 @@ func (mc *MasterClient) tryConnectToMaster(master string) (nextHintedLeader stri
 }
 
 func (mc *MasterClient) WithClient(fn func(client master_pb.SeaweedClient) error) error {
-	for mc.currentMaster == "" {
-		time.Sleep(3 * time.Second)
-	}
-	return pb.WithMasterClient(mc.currentMaster, mc.grpcDialOption, func(client master_pb.SeaweedClient) error {
-		return fn(client)
+	return util.Retry("master grpc", func() error {
+		for mc.currentMaster == "" {
+			time.Sleep(3 * time.Second)
+		}
+		return pb.WithMasterClient(mc.currentMaster, mc.grpcDialOption, func(client master_pb.SeaweedClient) error {
+			return fn(client)
+		})
 	})
 }

@@ -99,9 +99,9 @@ func retriedFetchChunkData(urlStrings []string, cipherKey []byte, isGzipped bool
 	var buffer bytes.Buffer
 	var shouldRetry bool
 
-	for waitTime := time.Second; waitTime < ReadWaitTime; waitTime += waitTime / 2 {
+	for waitTime := time.Second; waitTime < util.RetryWaitTime; waitTime += waitTime / 2 {
 		for _, urlString := range urlStrings {
-			shouldRetry, err = util.ReadUrlAsStream(urlString, cipherKey, isGzipped, isFullChunk, offset, size, func(data []byte) {
+			shouldRetry, err = util.ReadUrlAsStream(urlString+"?readDeleted=true", cipherKey, isGzipped, isFullChunk, offset, size, func(data []byte) {
 				buffer.Write(data)
 			})
 			if !shouldRetry {

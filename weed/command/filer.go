@@ -36,6 +36,7 @@ type FilerOptions struct {
 	maxMB                   *int
 	dirListingLimit         *int
 	dataCenter              *string
+	rack                    *string
 	enableNotification      *bool
 	disableHttp             *bool
 	cipher                  *bool
@@ -58,7 +59,8 @@ func init() {
 	f.disableDirListing = cmdFiler.Flag.Bool("disableDirListing", false, "turn off directory listing")
 	f.maxMB = cmdFiler.Flag.Int("maxMB", 32, "split files larger than the limit")
 	f.dirListingLimit = cmdFiler.Flag.Int("dirListLimit", 100000, "limit sub dir listing size")
-	f.dataCenter = cmdFiler.Flag.String("dataCenter", "", "prefer to write to volumes in this data center")
+	f.dataCenter = cmdFiler.Flag.String("dataCenter", "", "prefer to read and write to volumes in this data center")
+	f.rack = cmdFiler.Flag.String("rack", "", "prefer to write to volumes in this rack")
 	f.disableHttp = cmdFiler.Flag.Bool("disableHttp", false, "disable http request, only gRpc operations are allowed")
 	f.cipher = cmdFiler.Flag.Bool("encryptVolumeData", false, "encrypt data on volume servers")
 	f.peers = cmdFiler.Flag.String("peers", "", "all filers sharing the same filer store in comma separated ip:port list")
@@ -67,7 +69,7 @@ func init() {
 	// start s3 on filer
 	filerStartS3 = cmdFiler.Flag.Bool("s3", false, "whether to start S3 gateway")
 	filerS3Options.port = cmdFiler.Flag.Int("s3.port", 8333, "s3 server http listen port")
-	filerS3Options.domainName = cmdFiler.Flag.String("s3.domainName", "", "suffix of the host name, {bucket}.{domainName}")
+	filerS3Options.domainName = cmdFiler.Flag.String("s3.domainName", "", "suffix of the host name in comma separated list, {bucket}.{domainName}")
 	filerS3Options.tlsPrivateKey = cmdFiler.Flag.String("s3.key.file", "", "path to the TLS private key file")
 	filerS3Options.tlsCertificate = cmdFiler.Flag.String("s3.cert.file", "", "path to the TLS certificate file")
 	filerS3Options.config = cmdFiler.Flag.String("s3.config", "", "path to the config file")
@@ -141,6 +143,7 @@ func (fo *FilerOptions) startFiler() {
 		MaxMB:              *fo.maxMB,
 		DirListingLimit:    *fo.dirListingLimit,
 		DataCenter:         *fo.dataCenter,
+		Rack:               *fo.rack,
 		DefaultLevelDbDir:  defaultLevelDbDirectory,
 		DisableHttp:        *fo.disableHttp,
 		Host:               *fo.ip,

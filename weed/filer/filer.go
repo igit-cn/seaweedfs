@@ -41,14 +41,16 @@ type Filer struct {
 	metaLogReplication  string
 	MetaAggregator      *MetaAggregator
 	Signature           int32
+	FilerConf           *FilerConf
 }
 
 func NewFiler(masters []string, grpcDialOption grpc.DialOption,
-	filerHost string, filerGrpcPort uint32, collection string, replication string, notifyFn func()) *Filer {
+	filerHost string, filerGrpcPort uint32, collection string, replication string, dataCenter string, notifyFn func()) *Filer {
 	f := &Filer{
-		MasterClient:        wdclient.NewMasterClient(grpcDialOption, "filer", filerHost, filerGrpcPort, masters),
+		MasterClient:        wdclient.NewMasterClient(grpcDialOption, "filer", filerHost, filerGrpcPort, dataCenter, masters),
 		fileIdDeletionQueue: util.NewUnboundedQueue(),
 		GrpcDialOption:      grpcDialOption,
+		FilerConf:           NewFilerConf(),
 	}
 	f.LocalMetaLogBuffer = log_buffer.NewLogBuffer(LogFlushInterval, f.logFlushFunc, notifyFn)
 	f.metaLogCollection = collection
@@ -206,8 +208,8 @@ func (f *Filer) CreateEntry(ctx context.Context, entry *Entry, o_excl bool, isFr
 
 	oldEntry, _ := f.FindEntry(ctx, entry.FullPath)
 
-	glog.V(4).Infof("CreateEntry %s: old entry: %v exclusive:%v", entry.FullPath, oldEntry, o_excl)
 	if oldEntry == nil {
+		glog.V(4).Infof("InsertEntry %s: new entry: %v", entry.FullPath, entry.Name())
 		if err := f.Store.InsertEntry(ctx, entry); err != nil {
 			glog.Errorf("insert entry %s: %v", entry.FullPath, err)
 			return fmt.Errorf("insert entry %s: %v", entry.FullPath, err)
@@ -217,6 +219,7 @@ func (f *Filer) CreateEntry(ctx context.Context, entry *Entry, o_excl bool, isFr
 			glog.V(3).Infof("EEXIST: entry %s already exists", entry.FullPath)
 			return fmt.Errorf("EEXIST: entry %s already exists", entry.FullPath)
 		}
+		glog.V(4).Infof("UpdateEntry %s: old entry: %v", entry.FullPath, oldEntry.Name())
 		if err := f.UpdateEntry(ctx, oldEntry, entry); err != nil {
 			glog.Errorf("update entry %s: %v", entry.FullPath, err)
 			return fmt.Errorf("update entry %s: %v", entry.FullPath, err)

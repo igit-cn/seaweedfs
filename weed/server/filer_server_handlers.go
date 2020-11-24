@@ -10,6 +10,10 @@ import (
 
 func (fs *FilerServer) filerHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Server", "SeaweedFS Filer "+util.VERSION)
+	if r.Header.Get("Origin") != "" {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+	}
 	start := time.Now()
 	switch r.Method {
 	case "GET":
@@ -22,21 +26,37 @@ func (fs *FilerServer) filerHandler(w http.ResponseWriter, r *http.Request) {
 		stats.FilerRequestHistogram.WithLabelValues("head").Observe(time.Since(start).Seconds())
 	case "DELETE":
 		stats.FilerRequestCounter.WithLabelValues("delete").Inc()
-		fs.DeleteHandler(w, r)
+		if _, ok := r.URL.Query()["tagging"]; ok {
+			fs.DeleteTaggingHandler(w, r)
+		} else {
+			fs.DeleteHandler(w, r)
+		}
 		stats.FilerRequestHistogram.WithLabelValues("delete").Observe(time.Since(start).Seconds())
 	case "PUT":
 		stats.FilerRequestCounter.WithLabelValues("put").Inc()
-		fs.PostHandler(w, r)
+		if _, ok := r.URL.Query()["tagging"]; ok {
+			fs.PutTaggingHandler(w, r)
+		} else {
+			fs.PostHandler(w, r)
+		}
 		stats.FilerRequestHistogram.WithLabelValues("put").Observe(time.Since(start).Seconds())
 	case "POST":
 		stats.FilerRequestCounter.WithLabelValues("post").Inc()
 		fs.PostHandler(w, r)
 		stats.FilerRequestHistogram.WithLabelValues("post").Observe(time.Since(start).Seconds())
+	case "OPTIONS":
+		stats.FilerRequestCounter.WithLabelValues("options").Inc()
+		OptionsHandler(w, r, false)
+		stats.FilerRequestHistogram.WithLabelValues("head").Observe(time.Since(start).Seconds())
 	}
 }
 
 func (fs *FilerServer) readonlyFilerHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Server", "SeaweedFS Filer "+util.VERSION)
+	if r.Header.Get("Origin") != "" {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+	}
 	start := time.Now()
 	switch r.Method {
 	case "GET":
@@ -47,5 +67,18 @@ func (fs *FilerServer) readonlyFilerHandler(w http.ResponseWriter, r *http.Reque
 		stats.FilerRequestCounter.WithLabelValues("head").Inc()
 		fs.GetOrHeadHandler(w, r, false)
 		stats.FilerRequestHistogram.WithLabelValues("head").Observe(time.Since(start).Seconds())
+	case "OPTIONS":
+		stats.FilerRequestCounter.WithLabelValues("options").Inc()
+		OptionsHandler(w, r, true)
+		stats.FilerRequestHistogram.WithLabelValues("head").Observe(time.Since(start).Seconds())
 	}
+}
+
+func OptionsHandler(w http.ResponseWriter, r *http.Request, isReadOnly bool) {
+	if isReadOnly {
+		w.Header().Add("Access-Control-Allow-Methods", "GET, OPTIONS")
+	} else {
+		w.Header().Add("Access-Control-Allow-Methods", "PUT, POST, GET, DELETE, OPTIONS")
+	}
+	w.Header().Add("Access-Control-Allow-Headers", "*")
 }

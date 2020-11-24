@@ -194,23 +194,30 @@ func (s *Store) SetDataCenter(dataCenter string) {
 func (s *Store) SetRack(rack string) {
 	s.rack = rack
 }
+func (s *Store) GetDataCenter() string {
+	return s.dataCenter
+}
+func (s *Store) GetRack() string {
+	return s.rack
+}
 
 func (s *Store) CollectHeartbeat() *master_pb.Heartbeat {
 	var volumeMessages []*master_pb.VolumeInformationMessage
 	maxVolumeCount := 0
 	var maxFileKey NeedleId
 	collectionVolumeSize := make(map[string]uint64)
-	collectionVolumeReadOnlyCount := make(map[string]uint8)
+	collectionVolumeReadOnlyCount := make(map[string]map[string]uint8)
 	for _, location := range s.Locations {
 		var deleteVids []needle.VolumeId
 		maxVolumeCount = maxVolumeCount + location.MaxVolumeCount
 		location.volumesLock.RLock()
 		for _, v := range location.volumes {
-			if maxFileKey < v.MaxFileKey() {
-				maxFileKey = v.MaxFileKey()
+			curMaxFileKey, volumeMessage := v.ToVolumeInformationMessage()
+			if maxFileKey < curMaxFileKey {
+				maxFileKey = curMaxFileKey
 			}
-			if !v.expired(s.GetVolumeSizeLimit()) {
-				volumeMessages = append(volumeMessages, v.ToVolumeInformationMessage())
+			if !v.expired(volumeMessage.Size, s.GetVolumeSizeLimit()) {
+				volumeMessages = append(volumeMessages, volumeMessage)
 			} else {
 				if v.expiredLongEnough(MAX_TTL_VOLUME_REMOVAL_DELAY) {
 					deleteVids = append(deleteVids, v.Id)
@@ -218,10 +225,26 @@ func (s *Store) CollectHeartbeat() *master_pb.Heartbeat {
 					glog.V(0).Infoln("volume", v.Id, "is expired.")
 				}
 			}
-			fileSize, _, _ := v.FileStat()
-			collectionVolumeSize[v.Collection] += fileSize
+			collectionVolumeSize[v.Collection] += volumeMessage.Size
+			if _, exist := collectionVolumeReadOnlyCount[v.Collection]; !exist {
+				collectionVolumeReadOnlyCount[v.Collection] = map[string]uint8{
+					"IsReadOnly":       0,
+					"noWriteOrDelete":  0,
+					"noWriteCanDelete": 0,
+					"isDiskSpaceLow":   0,
+				}
+			}
 			if v.IsReadOnly() {
-				collectionVolumeReadOnlyCount[v.Collection] += 1
+				collectionVolumeReadOnlyCount[v.Collection]["IsReadOnly"] += 1
+				if v.noWriteOrDelete {
+					collectionVolumeReadOnlyCount[v.Collection]["noWriteOrDelete"] += 1
+				}
+				if v.noWriteCanDelete {
+					collectionVolumeReadOnlyCount[v.Collection]["noWriteCanDelete"] += 1
+				}
+				if v.location.isDiskSpaceLow {
+					collectionVolumeReadOnlyCount[v.Collection]["isDiskSpaceLow"] += 1
+				}
 			}
 		}
 		location.volumesLock.RUnlock()
@@ -247,8 +270,10 @@ func (s *Store) CollectHeartbeat() *master_pb.Heartbeat {
 		stats.VolumeServerDiskSizeGauge.WithLabelValues(col, "normal").Set(float64(size))
 	}
 
-	for col, count := range collectionVolumeReadOnlyCount {
-		stats.VolumeServerReadOnlyVolumeGauge.WithLabelValues(col, "normal").Set(float64(count))
+	for col, types := range collectionVolumeReadOnlyCount {
+		for t, count := range types {
+			stats.VolumeServerReadOnlyVolumeGauge.WithLabelValues(col, t).Set(float64(count))
+		}
 	}
 
 	return &master_pb.Heartbeat{
@@ -436,7 +461,8 @@ func (s *Store) GetVolumeSizeLimit() uint64 {
 func (s *Store) MaybeAdjustVolumeMax() (hasChanges bool) {
 	volumeSizeLimit := s.GetVolumeSizeLimit()
 	for _, diskLocation := range s.Locations {
-		if diskLocation.MaxVolumeCount == 0 {
+		if diskLocation.OriginalMaxVolumeCount == 0 {
+			currentMaxVolumeCount := diskLocation.MaxVolumeCount
 			diskStatus := stats.NewDiskStatus(diskLocation.Directory)
 			unusedSpace := diskLocation.UnUsedSpace(volumeSizeLimit)
 			unclaimedSpaces := int64(diskStatus.Free) - int64(unusedSpace)
@@ -446,9 +472,9 @@ func (s *Store) MaybeAdjustVolumeMax() (hasChanges bool) {
 				maxVolumeCount += int(uint64(unclaimedSpaces)/volumeSizeLimit) - 1
 			}
 			diskLocation.MaxVolumeCount = maxVolumeCount
-			glog.V(0).Infof("disk %s max %d unclaimedSpace:%dMB, unused:%dMB volumeSizeLimit:%dMB",
+			glog.V(2).Infof("disk %s max %d unclaimedSpace:%dMB, unused:%dMB volumeSizeLimit:%dMB",
 				diskLocation.Directory, maxVolumeCount, unclaimedSpaces/1024/1024, unusedSpace/1024/1024, volumeSizeLimit/1024/1024)
-			hasChanges = true
+			hasChanges = hasChanges || currentMaxVolumeCount != diskLocation.MaxVolumeCount
 		}
 	}
 	return

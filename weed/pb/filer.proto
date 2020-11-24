@@ -217,7 +217,8 @@ message AssignVolumeRequest {
     string replication = 3;
     int32 ttl_sec = 4;
     string data_center = 5;
-    string parent_path = 6;
+    string path = 6;
+    string rack = 7;
 }
 
 message AssignVolumeResponse {
@@ -346,4 +347,24 @@ message KvPutRequest {
 }
 message KvPutResponse {
     string error = 1;
+}
+
+// path-based configurations
+message FilerConf {
+    int32 version = 1;
+    message PathConf {
+        string location_prefix = 1;
+        string collection = 2;
+        string replication = 3;
+        string ttl = 4;
+        enum DiskType {
+            NONE = 0;
+            HDD = 1;
+            SSD = 2;
+        }
+        DiskType disk_type = 5;
+        bool fsync = 6;
+        uint32 volume_growth_count = 7;
+    }
+    repeated PathConf locations = 2;
 }

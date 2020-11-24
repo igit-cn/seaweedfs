@@ -132,6 +132,8 @@ func NewVolumeLayout(rp *super_block.ReplicaPlacement, ttl *needle.TTL, volumeSi
 }
 
 func (vl *VolumeLayout) String() string {
+	vl.accessLock.RLock()
+	defer vl.accessLock.RUnlock()
 	return fmt.Sprintf("rp:%v, ttl:%v, vid2location:%v, writables:%v, volumeSizeLimit:%v", vl.rp, vl.ttl, vl.vid2location, vl.writables, vl.volumeSizeLimit)
 }
 
@@ -139,7 +141,6 @@ func (vl *VolumeLayout) RegisterVolume(v *storage.VolumeInfo, dn *DataNode) {
 	vl.accessLock.Lock()
 	defer vl.accessLock.Unlock()
 
-	defer vl.ensureCorrectWritables(v)
 	defer vl.rememberOversizedVolume(v, dn)
 
 	if _, ok := vl.vid2location[v.Id]; !ok {
@@ -189,7 +190,7 @@ func (vl *VolumeLayout) UnRegisterVolume(v *storage.VolumeInfo, dn *DataNode) {
 
 		vl.readonlyVolumes.Remove(v.Id, dn)
 		vl.oversizedVolumes.Remove(v.Id, dn)
-		vl.ensureCorrectWritables(v)
+		vl.ensureCorrectWritables(v.Id)
 
 		if location.Length() == 0 {
 			delete(vl.vid2location, v.Id)
@@ -198,14 +199,32 @@ func (vl *VolumeLayout) UnRegisterVolume(v *storage.VolumeInfo, dn *DataNode) {
 	}
 }
 
-func (vl *VolumeLayout) ensureCorrectWritables(v *storage.VolumeInfo) {
-	if vl.enoughCopies(v.Id) && vl.isWritable(v) {
-		if !vl.oversizedVolumes.IsTrue(v.Id) {
-			vl.setVolumeWritable(v.Id)
+func (vl *VolumeLayout) EnsureCorrectWritables(v *storage.VolumeInfo) {
+	vl.accessLock.Lock()
+	defer vl.accessLock.Unlock()
+
+	vl.ensureCorrectWritables(v.Id)
+}
+
+func (vl *VolumeLayout) ensureCorrectWritables(vid needle.VolumeId) {
+	if vl.enoughCopies(vid) && vl.isAllWritable(vid) {
+		if !vl.oversizedVolumes.IsTrue(vid) {
+			vl.setVolumeWritable(vid)
 		}
 	} else {
-		vl.removeFromWritable(v.Id)
+		vl.removeFromWritable(vid)
 	}
+}
+
+func (vl *VolumeLayout) isAllWritable(vid needle.VolumeId) bool {
+	for _, dn := range vl.vid2location[vid].list {
+		if v, found := dn.volumes[vid]; found {
+			if v.ReadOnly {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (vl *VolumeLayout) isOversized(v *storage.VolumeInfo) bool {

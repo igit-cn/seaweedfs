@@ -177,7 +177,9 @@ func (t *Topology) DeleteCollection(collectionName string) {
 }
 
 func (t *Topology) RegisterVolumeLayout(v storage.VolumeInfo, dn *DataNode) {
-	t.GetVolumeLayout(v.Collection, v.ReplicaPlacement, v.Ttl).RegisterVolume(&v, dn)
+	vl := t.GetVolumeLayout(v.Collection, v.ReplicaPlacement, v.Ttl)
+	vl.RegisterVolume(&v, dn)
+	vl.EnsureCorrectWritables(&v)
 }
 func (t *Topology) UnRegisterVolumeLayout(v storage.VolumeInfo, dn *DataNode) {
 	glog.Infof("removing volume info:%+v", v)
@@ -221,7 +223,7 @@ func (t *Topology) SyncDataNodeRegistration(volumes []*master_pb.VolumeInformati
 	}
 	for _, v := range changedVolumes {
 		vl := t.GetVolumeLayout(v.Collection, v.ReplicaPlacement, v.Ttl)
-		vl.ensureCorrectWritables(&v)
+		vl.EnsureCorrectWritables(&v)
 	}
 	return
 }

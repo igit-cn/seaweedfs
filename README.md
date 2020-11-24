@@ -58,11 +58,12 @@ Your support will be really appreciated by me and other supporters!
 Table of Contents
 =================
 
+* [Quick Start](#quick-start)
 * [Introduction](#introduction)
 * [Features](#features)
     * [Additional Features](#additional-features)
     * [Filer Features](#filer-features)
-* [Example Usage](#example-usage)
+* [Example: Using Seaweed Object Store](#example-Using-Seaweed-Object-Store)
 * [Architecture](#architecture)
 * [Compared to Other File Systems](#compared-to-other-file-systems)
     * [Compared to HDFS](#compared-to-hdfs)
@@ -74,6 +75,13 @@ Table of Contents
 * [Disk Related Topics](#disk-related-topics)
 * [Benchmark](#Benchmark)
 * [License](#license)
+
+
+## Quick Start ##
+* Download the latest binary from https://github.com/chrislusf/seaweedfs/releases and unzip a single binary file `weed` or `weed.exe`
+* Run `weed server -dir=/some/data/dir -s3` to start one master, one volume server, one filer, and one S3 gateway.
+
+Also, to increase capacity, just add more volume servers by `weed volume -dir="/some/data/dir2" -mserver="<master_host>:9333" -port=8081` locally or a different machine. That is it!
 
 ## Introduction ##
 
@@ -101,7 +109,7 @@ On top of the object store, optional [Filer] can support directories and POSIX a
 * Automatic compaction to reclaim disk space after deletion or update.
 * [Automatic entry TTL expiration][VolumeServerTTL].
 * Any server with some disk spaces can add to the total storage space.
-* Adding/Removing servers does **not** cause any data re-balancing.
+* Adding/Removing servers does **not** cause any data re-balancing unless triggered by admin commands.
 * Optional picture resizing.
 * Support ETag, Accept-Range, Last-Modified, etc.
 * Support in-memory/leveldb/readonly mode tuning for memory/performance balance.
@@ -113,15 +121,16 @@ On top of the object store, optional [Filer] can support directories and POSIX a
 
 ## Filer Features ##
 * [Filer server][Filer] provides "normal" directories and files via http.
-* [Super Large Files][SuperLargeFiles] stores large or super large files in tens of TB.
+* [File TTL][FilerTTL] automatically expires file metadata and actual file data.
 * [Mount filer][Mount] reads and writes files directly as a local directory via FUSE.
+* [Filer Store Replication][FilerStoreReplication] enables HA for filer meta data stores.
 * [Active-Active Replication][ActiveActiveAsyncReplication] enables asynchronous one-way or two-way cross cluster continuous replication.
 * [Amazon S3 compatible API][AmazonS3API] accesses files with S3 tooling.
 * [Hadoop Compatible File System][Hadoop] accesses files from Hadoop/Spark/Flink/etc or even runs HBase.
 * [Async Replication To Cloud][BackupToCloud] has extremely fast local access and backups to Amazon S3, Google Cloud Storage, Azure, BackBlaze.
 * [WebDAV] accesses as a mapped drive on Mac and Windows, or from mobile devices.
 * [AES256-GCM Encrypted Storage][FilerDataEncryption] safely stores the encrypted data.
-* [File TTL][FilerTTL] automatically purges file metadata and actual file data.
+* [Super Large Files][SuperLargeFiles] stores large or super large files in tens of TB.
 * [Kubernetes CSI Driver][SeaweedFsCsiDriver] A Container Storage Interface (CSI) Driver. [![Docker Pulls](https://img.shields.io/docker/pulls/chrislusf/seaweedfs-csi-driver.svg?maxAge=4800)](https://hub.docker.com/r/chrislusf/seaweedfs-csi-driver/)
 
 [Filer]: https://github.com/chrislusf/seaweedfs/wiki/Directories-and-Files
@@ -138,10 +147,11 @@ On top of the object store, optional [Filer] can support directories and POSIX a
 [VolumeServerTTL]: https://github.com/chrislusf/seaweedfs/wiki/Store-file-with-a-Time-To-Live
 [SeaweedFsCsiDriver]: https://github.com/seaweedfs/seaweedfs-csi-driver
 [ActiveActiveAsyncReplication]: https://github.com/chrislusf/seaweedfs/wiki/Filer-Active-Active-cross-cluster-continuous-synchronization
+[FilerStoreReplication]: https://github.com/chrislusf/seaweedfs/wiki/Filer-Store-Replication
 
 [Back to TOC](#table-of-contents)
 
-## Example Usage ##
+## Example: Using Seaweed Object Store ##
 
 By default, the master node runs on port 9333, and the volume nodes run on port 8080.
 Let's start one master node, and two volume nodes on port 8080 and 8081. Ideally, they should be started from different machines. We'll use localhost as an example.
@@ -425,11 +435,12 @@ SeaweedFS Filer uses off-the-shelf stores, such as MySql, Postgres, Mongodb, Red
 
 MinIO follows AWS S3 closely and is ideal for testing for S3 API. It has good UI, policies, versionings, etc. SeaweedFS is trying to catch up here. It is also possible to put MinIO as a gateway in front of SeaweedFS later.
 
-MinIO metadata are in simple files. Each file write will incur meta file writes.
+MinIO metadata are in simple files. Each file write will incur extra writes to corresponding meta file.
 
-MinIO does not have optimization for large number of small files.
+MinIO does not have optimization for lots of small files. The files are simply stored as is to local disks.
+Plus the extra meta file and shards for erasure coding, it only amplifies the LOSF problem.
 
-MinIO has multiple disk IO to read one file. SeaweedFS has O(1) disk reads.
+MinIO has multiple disk IO to read one file. SeaweedFS has O(1) disk reads, even for erasure coded files.
 
 MinIO has full-time erasure coding. SeaweedFS uses replication on hot data for faster speed and optionally applies erasure coding on warm data.
 
@@ -439,16 +450,13 @@ MinIO has specific requirements on storage layout. It is not flexible to adjust 
 
 ## Dev Plan ##
 
-More tools and documentation, on how to maintain and scale the system. For example, how to move volumes, automatically balancing data, how to grow volumes, how to check system status, etc.
-Other key features include: Erasure Encoding, JWT security.
+* More tools and documentation, on how to manage and scale the system. For example, how to move volumes, automatically balancing data, how to grow volumes, how to check system status, etc.
+* Integrate with Kubernetes. build [SeaweedFS Operator](https://github.com/seaweedfs/seaweedfs-operator).
+* Add ftp server.
+* Read and write stream data.
+* Support structured data.
 
 This is a super exciting project! And we need helpers and [support](https://www.patreon.com/seaweedfs)!
-
-BTW, We suggest run the code style check script `util/gostd` before you push your branch to remote, it will make SeaweedFS easy to review, maintain and develop:
-
-```
-$ ./util/gostd
-```
 
 [Back to TOC](#table-of-contents)
 
@@ -463,29 +471,17 @@ https://golang.org/doc/install
 make sure you set up your $GOPATH
 
 
-Step 2: also you may need to install Mercurial by following the instructions at:
-
-http://mercurial.selenic.com/downloads
-
+Step 2: checkout this repo:
+```bash
+git clone https://github.com/chrislusf/seaweedfs.git
+```
 Step 3: download, compile, and install the project by executing the following command
 
 ```bash
-go get github.com/chrislusf/seaweedfs/weed
+make install
 ```
 
 Once this is done, you will find the executable "weed" in your `$GOPATH/bin` directory
-
-Note:
-* If you got into this problem, try to `rm -Rf $GOPATH/src/go.etcd.io/etcd/vendor/golang.org/x/net/trace` and build again.
-```
-panic: /debug/requests is already registered. You may have two independent copies of golang.org/x/net/trace in your binary, trying to maintain separate state. This may involve a vendored copy of golang.org/x/net/trace.
-```
-
-Step 4: after you modify your code locally, you could start a local build by calling `go install` under
-
-```
-$GOPATH/src/github.com/chrislusf/seaweedfs/weed
-```
 
 [Back to TOC](#table-of-contents)
 
