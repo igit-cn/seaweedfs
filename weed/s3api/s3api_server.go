@@ -2,8 +2,11 @@ package s3api
 
 import (
 	"fmt"
+	"github.com/chrislusf/seaweedfs/weed/filer"
+	. "github.com/chrislusf/seaweedfs/weed/s3api/s3_constants"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 	"google.golang.org/grpc"
@@ -17,6 +20,7 @@ type S3ApiServerOption struct {
 	DomainName       string
 	BucketsPath      string
 	GrpcDialOption   grpc.DialOption
+	AllowEmptyFolder bool
 }
 
 type S3ApiServer struct {
@@ -27,10 +31,12 @@ type S3ApiServer struct {
 func NewS3ApiServer(router *mux.Router, option *S3ApiServerOption) (s3ApiServer *S3ApiServer, err error) {
 	s3ApiServer = &S3ApiServer{
 		option: option,
-		iam:    NewIdentityAccessManagement(option.Config, option.DomainName),
+		iam:    NewIdentityAccessManagement(option),
 	}
 
 	s3ApiServer.registerRouter(router)
+
+	go s3ApiServer.subscribeMetaEvents("s3", filer.IamConfigDirecotry+"/"+filer.IamIdentityFile, time.Now().UnixNano())
 
 	return s3ApiServer, nil
 }
@@ -123,7 +129,7 @@ func (s3a *S3ApiServer) registerRouter(router *mux.Router) {
 	}
 
 	// ListBuckets
-	apiRouter.Methods("GET").Path("/").HandlerFunc(track(s3a.iam.Auth(s3a.ListBucketsHandler, ACTION_ADMIN), "LIST"))
+	apiRouter.Methods("GET").Path("/").HandlerFunc(track(s3a.ListBucketsHandler, "LIST"))
 
 	// NotFound
 	apiRouter.NotFoundHandler = http.HandlerFunc(notFoundHandler)
