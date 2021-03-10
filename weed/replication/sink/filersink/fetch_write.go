@@ -30,6 +30,7 @@ func (fs *FilerSink) replicateChunks(sourceChunks []*filer_pb.FileChunk, path st
 			replicatedChunk, e := fs.replicateOneChunk(chunk, path)
 			if e != nil {
 				err = e
+				return
 			}
 			replicatedChunks[index] = replicatedChunk
 		}(sourceChunk, chunkIndex)
@@ -77,6 +78,7 @@ func (fs *FilerSink) fetchAndWrite(sourceChunk *filer_pb.FileChunk, path string)
 			Collection:  fs.collection,
 			TtlSec:      fs.ttlSec,
 			DataCenter:  fs.dataCenter,
+			DiskType:    fs.diskType,
 			Path:        path,
 		}
 
@@ -97,6 +99,9 @@ func (fs *FilerSink) fetchAndWrite(sourceChunk *filer_pb.FileChunk, path string)
 	}
 
 	fileUrl := fmt.Sprintf("http://%s/%s", host, fileId)
+	if fs.writeChunkByFiler {
+		fileUrl = fmt.Sprintf("http://%s/?proxyChunkId=%s", fs.address, fileId)
+	}
 
 	glog.V(4).Infof("replicating %s to %s header:%+v", filename, fileUrl, header)
 

@@ -25,19 +25,28 @@ type FilerSource struct {
 	grpcAddress    string
 	grpcDialOption grpc.DialOption
 	Dir            string
+	address        string
+	proxyByFiler   bool
 }
 
 func (fs *FilerSource) Initialize(configuration util.Configuration, prefix string) error {
 	return fs.DoInitialize(
+		"",
 		configuration.GetString(prefix+"grpcAddress"),
 		configuration.GetString(prefix+"directory"),
+		false,
 	)
 }
 
-func (fs *FilerSource) DoInitialize(grpcAddress string, dir string) (err error) {
+func (fs *FilerSource) DoInitialize(address, grpcAddress string, dir string, readChunkFromFiler bool) (err error) {
+	fs.address = address
+	if fs.address == "" {
+		fs.address = pb.GrpcAddressToServerAddress(grpcAddress)
+	}
 	fs.grpcAddress = grpcAddress
 	fs.Dir = dir
 	fs.grpcDialOption = security.LoadClientTLS(util.GetViper(), "grpc.client")
+	fs.proxyByFiler = readChunkFromFiler
 	return nil
 }
 
@@ -74,16 +83,24 @@ func (fs *FilerSource) LookupFileId(part string) (fileUrls []string, err error) 
 		return nil, fmt.Errorf("LookupFileId locate volume id %s: %v", vid, err)
 	}
 
-	for _, loc := range locations.Locations {
-		fileUrls = append(fileUrls, fmt.Sprintf("http://%s/%s", loc.Url, part))
+	if !fs.proxyByFiler {
+		for _, loc := range locations.Locations {
+			fileUrls = append(fileUrls, fmt.Sprintf("http://%s/%s?readDeleted=true", loc.Url, part))
+		}
+	} else {
+		fileUrls = append(fileUrls, fmt.Sprintf("http://%s/?proxyChunkId=%s", fs.address, part))
 	}
 
 	return
 }
 
-func (fs *FilerSource) ReadPart(part string) (filename string, header http.Header, resp *http.Response, err error) {
+func (fs *FilerSource) ReadPart(fileId string) (filename string, header http.Header, resp *http.Response, err error) {
 
-	fileUrls, err := fs.LookupFileId(part)
+	if fs.proxyByFiler {
+		return util.DownloadFile("http://" + fs.address + "/?proxyChunkId=" + fileId)
+	}
+
+	fileUrls, err := fs.LookupFileId(fileId)
 	if err != nil {
 		return "", nil, nil, err
 	}

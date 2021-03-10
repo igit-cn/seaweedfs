@@ -6,6 +6,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -60,15 +61,7 @@ func (fs *FilerServer) GetOrHeadHandler(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	if len(entry.Chunks) == 0 && len(entry.Content) == 0 {
-		glog.V(1).Infof("no file chunks for %s, attr=%+v", path, entry.Attr)
-		stats.FilerRequestCounter.WithLabelValues("read.nocontent").Inc()
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Last-Modified", entry.Attr.Mtime.Format(http.TimeFormat))
 
 	// mime type
 	mimeType := entry.Attr.Mime
@@ -99,6 +92,16 @@ func (fs *FilerServer) GetOrHeadHandler(w http.ResponseWriter, r *http.Request, 
 		w.Header().Set(k, string(v))
 	}
 
+	//Seaweed custom header are not visible to Vue or javascript
+	seaweedHeaders := []string{}
+	for header, _ := range w.Header() {
+		if strings.HasPrefix(header, "Seaweed-") {
+			seaweedHeaders = append(seaweedHeaders, header)
+		}
+	}
+	seaweedHeaders = append(seaweedHeaders, "Content-Disposition")
+	w.Header().Set("Access-Control-Expose-Headers", strings.Join(seaweedHeaders, ","))
+
 	//set tag count
 	if r.Method == "GET" {
 		tagCount := 0
@@ -121,6 +124,7 @@ func (fs *FilerServer) GetOrHeadHandler(w http.ResponseWriter, r *http.Request, 
 	setEtag(w, etag)
 
 	filename := entry.Name()
+	filename = url.QueryEscape(filename)
 	adjustHeaderContentDisposition(w, r, filename)
 
 	totalSize := int64(entry.Size())
@@ -146,9 +150,13 @@ func (fs *FilerServer) GetOrHeadHandler(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	processRangeRequest(r, w, totalSize, mimeType, func(writer io.Writer, offset int64, size int64) error {
+	processRangeRequest(r, w, totalSize, mimeType, func(writer io.Writer, offset int64, size int64, httpStatusCode int) error {
+		if httpStatusCode != 0 {
+			w.WriteHeader(httpStatusCode)
+		}
 		if offset+size <= int64(len(entry.Content)) {
 			_, err := writer.Write(entry.Content[offset : offset+size])
+			glog.Errorf("failed to write entry content: %v", err)
 			return err
 		}
 		return filer.StreamContent(fs.filer.MasterClient, writer, entry.Chunks, offset, size)

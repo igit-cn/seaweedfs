@@ -13,16 +13,16 @@ import (
 	"github.com/chrislusf/seaweedfs/weed/wdclient"
 )
 
-func StreamContent(masterClient *wdclient.MasterClient, w io.Writer, chunks []*filer_pb.FileChunk, offset int64, size int64) error {
+func StreamContent(masterClient wdclient.HasLookupFileIdFunction, w io.Writer, chunks []*filer_pb.FileChunk, offset int64, size int64) error {
 
 	// fmt.Printf("start to stream content for chunks: %+v\n", chunks)
-	chunkViews := ViewFromChunks(masterClient.LookupFileId, chunks, offset, size)
+	chunkViews := ViewFromChunks(masterClient.GetLookupFileIdFunction(), chunks, offset, size)
 
 	fileId2Url := make(map[string][]string)
 
 	for _, chunkView := range chunkViews {
 
-		urlStrings, err := masterClient.LookupFileId(chunkView.FileId)
+		urlStrings, err := masterClient.GetLookupFileIdFunction()(chunkView.FileId)
 		if err != nil {
 			glog.V(1).Infof("operation LookupFileId %s failed, err: %v", chunkView.FileId, err)
 			return err
@@ -86,7 +86,7 @@ type ChunkStreamReader struct {
 	bufferOffset int64
 	bufferPos    int
 	chunkIndex   int
-	lookupFileId LookupFileIdFunctionType
+	lookupFileId wdclient.LookupFileIdFunctionType
 }
 
 var _ = io.ReadSeeker(&ChunkStreamReader{})
@@ -181,7 +181,7 @@ func (c *ChunkStreamReader) fetchChunkToBuffer(chunkView *ChunkView) error {
 	var buffer bytes.Buffer
 	var shouldRetry bool
 	for _, urlString := range urlStrings {
-		shouldRetry, err = util.ReadUrlAsStream(urlString+"?readDeleted=true", chunkView.CipherKey, chunkView.IsGzipped, chunkView.IsFullChunk(), chunkView.Offset, int(chunkView.Size), func(data []byte) {
+		shouldRetry, err = util.FastReadUrlAsStream(urlString, chunkView.CipherKey, chunkView.IsGzipped, chunkView.IsFullChunk(), chunkView.Offset, int(chunkView.Size), func(data []byte) {
 			buffer.Write(data)
 		})
 		if !shouldRetry {

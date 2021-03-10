@@ -26,6 +26,7 @@ func (wfs *WFS) saveDataAsChunk(fullPath util.FullPath) filer.SaveDataAsChunkFun
 				Replication: wfs.option.Replication,
 				Collection:  wfs.option.Collection,
 				TtlSec:      wfs.option.TtlSec,
+				DiskType:    string(wfs.option.DiskType),
 				DataCenter:  wfs.option.DataCenter,
 				Path:        string(fullPath),
 			}
@@ -53,6 +54,9 @@ func (wfs *WFS) saveDataAsChunk(fullPath util.FullPath) filer.SaveDataAsChunkFun
 		}
 
 		fileUrl := fmt.Sprintf("http://%s/%s", host, fileId)
+		if wfs.option.VolumeServerAccess == "filerProxy" {
+			fileUrl = fmt.Sprintf("http://%s/?proxyChunkId=%s", wfs.option.FilerAddress, fileId)
+		}
 		uploadResult, err, data := operation.Upload(fileUrl, filename, wfs.option.Cipher, reader, false, "", nil, auth)
 		if err != nil {
 			glog.V(0).Infof("upload data %v to %s: %v", filename, fileUrl, err)

@@ -5,7 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"github.com/chrislusf/seaweedfs/weed/storage/needle"
+	"github.com/chrislusf/seaweedfs/weed/storage/types"
 	"io"
+	"path/filepath"
 	"sort"
 
 	"github.com/chrislusf/seaweedfs/weed/operation"
@@ -19,6 +21,7 @@ func init() {
 }
 
 type commandVolumeFixReplication struct {
+	collectionPattern *string
 }
 
 func (c *commandVolumeFixReplication) Name() string {
@@ -33,12 +36,13 @@ func (c *commandVolumeFixReplication) Help() string {
 	This command also finds all under-replicated volumes, and finds volume servers with free slots.
 	If the free slots satisfy the replication requirement, the volume content is copied over and mounted.
 
-	volume.fix.replication -n # do not take action
-	volume.fix.replication    # actually deleting or copying the volume files and mount the volume
+	volume.fix.replication -n                             # do not take action
+	volume.fix.replication                                # actually deleting or copying the volume files and mount the volume
+	volume.fix.replication -collectionPattern=important*  # fix any collections with prefix "important"
 
 	Note:
-		* each time this will only add back one replica for one volume id. If there are multiple replicas
-		  are missing, e.g. multiple volume servers are new, you may need to run this multiple times.
+		* each time this will only add back one replica for each volume id that is under replicated.
+		  If there are multiple replicas are missing, e.g. replica count is > 2, you may need to run this multiple times.
 		* do not run this too quickly within seconds, since the new volume replica may take a few seconds 
 		  to register itself to the master.
 
@@ -52,6 +56,7 @@ func (c *commandVolumeFixReplication) Do(args []string, commandEnv *CommandEnv, 
 	}
 
 	volFixReplicationCommand := flag.NewFlagSet(c.Name(), flag.ContinueOnError)
+	c.collectionPattern = volFixReplicationCommand.String("collectionPattern", "", "match with wildcard characters '*' and '?'")
 	skipChange := volFixReplicationCommand.Bool("n", false, "skip the changes")
 	if err = volFixReplicationCommand.Parse(args); err != nil {
 		return nil
@@ -59,18 +64,15 @@ func (c *commandVolumeFixReplication) Do(args []string, commandEnv *CommandEnv, 
 
 	takeAction := !*skipChange
 
-	var resp *master_pb.VolumeListResponse
-	err = commandEnv.MasterClient.WithClient(func(client master_pb.SeaweedClient) error {
-		resp, err = client.VolumeList(context.Background(), &master_pb.VolumeListRequest{})
-		return err
-	})
+	// collect topology information
+	topologyInfo, _, err := collectTopologyInfo(commandEnv)
 	if err != nil {
 		return err
 	}
 
 	// find all volumes that needs replication
 	// collect all data nodes
-	volumeReplicas, allLocations := collectVolumeReplicaLocations(resp)
+	volumeReplicas, allLocations := collectVolumeReplicaLocations(topologyInfo)
 
 	if len(allLocations) == 0 {
 		return fmt.Errorf("no data nodes at all")
@@ -98,22 +100,22 @@ func (c *commandVolumeFixReplication) Do(args []string, commandEnv *CommandEnv, 
 	}
 
 	// find the most under populated data nodes
-	keepDataNodesSorted(allLocations)
-
 	return c.fixUnderReplicatedVolumes(commandEnv, writer, takeAction, underReplicatedVolumeIds, volumeReplicas, allLocations)
 
 }
 
-func collectVolumeReplicaLocations(resp *master_pb.VolumeListResponse) (map[uint32][]*VolumeReplica, []location) {
+func collectVolumeReplicaLocations(topologyInfo *master_pb.TopologyInfo) (map[uint32][]*VolumeReplica, []location) {
 	volumeReplicas := make(map[uint32][]*VolumeReplica)
 	var allLocations []location
-	eachDataNode(resp.TopologyInfo, func(dc string, rack RackId, dn *master_pb.DataNodeInfo) {
+	eachDataNode(topologyInfo, func(dc string, rack RackId, dn *master_pb.DataNodeInfo) {
 		loc := newLocation(dc, string(rack), dn)
-		for _, v := range dn.VolumeInfos {
-			volumeReplicas[v.Id] = append(volumeReplicas[v.Id], &VolumeReplica{
-				location: &loc,
-				info:     v,
-			})
+		for _, diskInfo := range dn.DiskInfos {
+			for _, v := range diskInfo.VolumeInfos {
+				volumeReplicas[v.Id] = append(volumeReplicas[v.Id], &VolumeReplica{
+					location: &loc,
+					info:     v,
+				})
+			}
 		}
 		allLocations = append(allLocations, loc)
 	})
@@ -126,6 +128,17 @@ func (c *commandVolumeFixReplication) fixOverReplicatedVolumes(commandEnv *Comma
 		replicaPlacement, _ := super_block.NewReplicaPlacementFromByte(byte(replicas[0].info.ReplicaPlacement))
 
 		replica := pickOneReplicaToDelete(replicas, replicaPlacement)
+
+		// check collection name pattern
+		if *c.collectionPattern != "" {
+			matched, err := filepath.Match(*c.collectionPattern, replica.info.Collection)
+			if err != nil {
+				return fmt.Errorf("match pattern %s with collection %s: %v", *c.collectionPattern, replica.info.Collection, err)
+			}
+			if !matched {
+				break
+			}
+		}
 
 		fmt.Fprintf(writer, "deleting volume %d from %s ...\n", replica.info.Id, replica.location.dataNode.Id)
 
@@ -142,14 +155,30 @@ func (c *commandVolumeFixReplication) fixOverReplicatedVolumes(commandEnv *Comma
 }
 
 func (c *commandVolumeFixReplication) fixUnderReplicatedVolumes(commandEnv *CommandEnv, writer io.Writer, takeAction bool, underReplicatedVolumeIds []uint32, volumeReplicas map[uint32][]*VolumeReplica, allLocations []location) error {
+
 	for _, vid := range underReplicatedVolumeIds {
 		replicas := volumeReplicas[vid]
 		replica := pickOneReplicaToCopyFrom(replicas)
 		replicaPlacement, _ := super_block.NewReplicaPlacementFromByte(byte(replica.info.ReplicaPlacement))
 		foundNewLocation := false
+		hasSkippedCollection := false
+		keepDataNodesSorted(allLocations, types.ToDiskType(replica.info.DiskType))
+		fn := capacityByFreeVolumeCount(types.ToDiskType(replica.info.DiskType))
 		for _, dst := range allLocations {
 			// check whether data nodes satisfy the constraints
-			if dst.dataNode.FreeVolumeCount > 0 && satisfyReplicaPlacement(replicaPlacement, replicas, dst) {
+			if fn(dst.dataNode) > 0 && satisfyReplicaPlacement(replicaPlacement, replicas, dst) {
+				// check collection name pattern
+				if *c.collectionPattern != "" {
+					matched, err := filepath.Match(*c.collectionPattern, replica.info.Collection)
+					if err != nil {
+						return fmt.Errorf("match pattern %s with collection %s: %v", *c.collectionPattern, replica.info.Collection, err)
+					}
+					if !matched {
+						hasSkippedCollection = true
+						break
+					}
+				}
+
 				// ask the volume server to replicate the volume
 				foundNewLocation = true
 				fmt.Fprintf(writer, "replicating volume %d %s from %s to dataNode %s ...\n", replica.info.Id, replicaPlacement, replica.location.dataNode.Id, dst.dataNode.Id)
@@ -174,12 +203,12 @@ func (c *commandVolumeFixReplication) fixUnderReplicatedVolumes(commandEnv *Comm
 				}
 
 				// adjust free volume count
-				dst.dataNode.FreeVolumeCount--
-				keepDataNodesSorted(allLocations)
+				dst.dataNode.DiskInfos[replica.info.DiskType].FreeVolumeCount--
 				break
 			}
 		}
-		if !foundNewLocation {
+
+		if !foundNewLocation && !hasSkippedCollection {
 			fmt.Fprintf(writer, "failed to place volume %d replica as %s, existing:%+v\n", replica.info.Id, replicaPlacement, len(replicas))
 		}
 
@@ -187,9 +216,10 @@ func (c *commandVolumeFixReplication) fixUnderReplicatedVolumes(commandEnv *Comm
 	return nil
 }
 
-func keepDataNodesSorted(dataNodes []location) {
+func keepDataNodesSorted(dataNodes []location, diskType types.DiskType) {
+	fn := capacityByFreeVolumeCount(diskType)
 	sort.Slice(dataNodes, func(i, j int) bool {
-		return dataNodes[i].dataNode.FreeVolumeCount > dataNodes[j].dataNode.FreeVolumeCount
+		return fn(dataNodes[i].dataNode) > fn(dataNodes[j].dataNode)
 	})
 }
 

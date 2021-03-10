@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"github.com/chrislusf/seaweedfs/weed/util"
 	"io"
 	"os"
 	"strings"
@@ -9,7 +10,6 @@ import (
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/pb/master_pb"
 	"github.com/chrislusf/seaweedfs/weed/pb/volume_server_pb"
-	"github.com/spf13/viper"
 )
 
 type BackendStorageFile interface {
@@ -45,7 +45,7 @@ var (
 )
 
 // used by master to load remote storage configurations
-func LoadConfiguration(config *viper.Viper) {
+func LoadConfiguration(config *util.ViperProxy) {
 
 	StorageBackendPrefix := "storage.backend"
 
@@ -56,6 +56,9 @@ func LoadConfiguration(config *viper.Viper) {
 		}
 		for backendStorageId := range config.GetStringMap(StorageBackendPrefix + "." + backendTypeName) {
 			if !config.GetBool(StorageBackendPrefix + "." + backendTypeName + "." + backendStorageId + ".enabled") {
+				continue
+			}
+			if _, found := BackendStorages[backendTypeName+"."+backendStorageId]; found {
 				continue
 			}
 			backendStorage, buildErr := backendStorageFactory.BuildStorage(config,
@@ -79,6 +82,9 @@ func LoadFromPbStorageBackends(storageBackends []*master_pb.StorageBackend) {
 		backendStorageFactory, found := BackendStorageFactories[StorageType(storageBackend.Type)]
 		if !found {
 			glog.Warningf("storage type %s not found", storageBackend.Type)
+			continue
+		}
+		if _, found := BackendStorages[storageBackend.Type+"."+storageBackend.Id]; found {
 			continue
 		}
 		backendStorage, buildErr := backendStorageFactory.BuildStorage(newProperties(storageBackend.Properties), "", storageBackend.Id)

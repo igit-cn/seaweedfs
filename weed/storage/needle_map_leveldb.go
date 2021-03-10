@@ -31,6 +31,11 @@ func NewLevelDbNeedleMap(dbFileName string, indexFile *os.File, opts *opt.Option
 		generateLevelDbFile(dbFileName, indexFile)
 		glog.V(1).Infof("Finished Generating %s from %s", dbFileName, indexFile.Name())
 	}
+	if stat, err := indexFile.Stat(); err != nil {
+		glog.Fatalf("stat file %s: %v", indexFile.Name(), err)
+	} else {
+		m.indexFileOffset = stat.Size()
+	}
 	glog.V(1).Infof("Opening %s...", dbFileName)
 
 	if m.db, err = leveldb.OpenFile(dbFileName, opts); err != nil {
@@ -147,8 +152,10 @@ func (m *LevelDbNeedleMap) Close() {
 		glog.Warningf("close index file %s failed: %v", indexFileName, err)
 	}
 
-	if err := m.db.Close(); err != nil {
-		glog.Warningf("close levelDB failed: %v", err)
+	if m.db != nil {
+		if err := m.db.Close(); err != nil {
+			glog.Warningf("close levelDB failed: %v", err)
+		}
 	}
 }
 

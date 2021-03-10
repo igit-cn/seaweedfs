@@ -3,6 +3,7 @@ package topology
 import (
 	"errors"
 	"fmt"
+	"github.com/chrislusf/seaweedfs/weed/storage/types"
 	"math/rand"
 	"sync"
 	"time"
@@ -103,6 +104,7 @@ func (v *volumesBinaryState) copyState(list *VolumeLocationList) copyState {
 type VolumeLayout struct {
 	rp               *super_block.ReplicaPlacement
 	ttl              *needle.TTL
+	diskType         types.DiskType
 	vid2location     map[needle.VolumeId]*VolumeLocationList
 	writables        []needle.VolumeId   // transient array of writable volume id
 	readonlyVolumes  *volumesBinaryState // readonly volumes
@@ -118,10 +120,11 @@ type VolumeLayoutStats struct {
 	FileCount uint64
 }
 
-func NewVolumeLayout(rp *super_block.ReplicaPlacement, ttl *needle.TTL, volumeSizeLimit uint64, replicationAsMin bool) *VolumeLayout {
+func NewVolumeLayout(rp *super_block.ReplicaPlacement, ttl *needle.TTL, diskType types.DiskType, volumeSizeLimit uint64, replicationAsMin bool) *VolumeLayout {
 	return &VolumeLayout{
 		rp:               rp,
 		ttl:              ttl,
+		diskType:         diskType,
 		vid2location:     make(map[needle.VolumeId]*VolumeLocationList),
 		writables:        *new([]needle.VolumeId),
 		readonlyVolumes:  NewVolumesBinaryState(readOnlyState, rp, ExistCopies()),
@@ -218,7 +221,7 @@ func (vl *VolumeLayout) ensureCorrectWritables(vid needle.VolumeId) {
 
 func (vl *VolumeLayout) isAllWritable(vid needle.VolumeId) bool {
 	for _, dn := range vl.vid2location[vid].list {
-		if v, found := dn.volumes[vid]; found {
+		if v, getError := dn.GetVolumesById(vid); getError == nil {
 			if v.ReadOnly {
 				return false
 			}
@@ -429,7 +432,7 @@ func (vl *VolumeLayout) Stats() *VolumeLayoutStats {
 		if vl.readonlyVolumes.IsTrue(vid) {
 			ret.TotalSize += size
 		} else {
-			ret.TotalSize += vl.volumeSizeLimit
+			ret.TotalSize += vl.volumeSizeLimit * uint64(vll.Length())
 		}
 	}
 

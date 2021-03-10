@@ -24,6 +24,7 @@ var (
 	masterOptions    MasterOptions
 	filerOptions     FilerOptions
 	s3Options        S3Options
+	webdavOptions    WebDavOption
 	msgBrokerOptions MessageBrokerOptions
 )
 
@@ -61,9 +62,11 @@ var (
 	serverMetricsHttpPort     = cmdServer.Flag.Int("metricsPort", 0, "Prometheus metrics listen port")
 
 	// pulseSeconds              = cmdServer.Flag.Int("pulseSeconds", 5, "number of seconds between heartbeats")
+	isStartingMasterServer = cmdServer.Flag.Bool("master", true, "whether to start master server")
 	isStartingVolumeServer = cmdServer.Flag.Bool("volume", true, "whether to start volume server")
 	isStartingFiler        = cmdServer.Flag.Bool("filer", false, "whether to start filer")
 	isStartingS3           = cmdServer.Flag.Bool("s3", false, "whether to start S3 gateway")
+	isStartingWebDav       = cmdServer.Flag.Bool("webdav", false, "whether to start WebDAV gateway")
 	isStartingMsgBroker    = cmdServer.Flag.Bool("msgBroker", false, "whether to start message broker")
 
 	serverWhiteList []string
@@ -94,11 +97,12 @@ func init() {
 	filerOptions.dirListingLimit = cmdServer.Flag.Int("filer.dirListLimit", 1000, "limit sub dir listing size")
 	filerOptions.cipher = cmdServer.Flag.Bool("filer.encryptVolumeData", false, "encrypt data on volume servers")
 	filerOptions.peers = cmdServer.Flag.String("filer.peers", "", "all filers sharing the same filer store in comma separated ip:port list")
-	filerOptions.cacheToFilerLimit = cmdServer.Flag.Int("filer.cacheToFilerLimit", 0, "Small files smaller than this limit can be cached in filer store.")
+	filerOptions.saveToFilerLimit = cmdServer.Flag.Int("filer.saveToFilerLimit", 0, "Small files smaller than this limit can be cached in filer store.")
 
 	serverOptions.v.port = cmdServer.Flag.Int("volume.port", 8080, "volume server http listen port")
 	serverOptions.v.publicPort = cmdServer.Flag.Int("volume.port.public", 0, "volume server public port")
 	serverOptions.v.indexType = cmdServer.Flag.String("volume.index", "memory", "Choose [memory|leveldb|leveldbMedium|leveldbLarge] mode for memory~performance balance.")
+	serverOptions.v.diskType = cmdServer.Flag.String("volume.disk", "", "[hdd|ssd|<tag>] hard drive or solid state drive or any tag")
 	serverOptions.v.fixJpgOrientation = cmdServer.Flag.Bool("volume.images.fix.orientation", false, "Adjust jpg orientation when uploading.")
 	serverOptions.v.readRedirect = cmdServer.Flag.Bool("volume.read.redirect", true, "Redirect moved or non-local volumes.")
 	serverOptions.v.compactionMBPerSecond = cmdServer.Flag.Int("volume.compactionMBps", 0, "limit compaction speed in mega bytes per second")
@@ -107,12 +111,23 @@ func init() {
 	serverOptions.v.preStopSeconds = cmdServer.Flag.Int("volume.preStopSeconds", 10, "number of seconds between stop send heartbeats and stop volume server")
 	serverOptions.v.pprof = cmdServer.Flag.Bool("volume.pprof", false, "enable pprof http handlers. precludes --memprofile and --cpuprofile")
 	serverOptions.v.idxFolder = cmdServer.Flag.String("volume.dir.idx", "", "directory to store .idx files")
+	serverOptions.v.enableTcp = cmdServer.Flag.Bool("volume.tcp", false, "<exprimental> enable tcp port")
 
 	s3Options.port = cmdServer.Flag.Int("s3.port", 8333, "s3 server http listen port")
 	s3Options.domainName = cmdServer.Flag.String("s3.domainName", "", "suffix of the host name in comma separated list, {bucket}.{domainName}")
 	s3Options.tlsPrivateKey = cmdServer.Flag.String("s3.key.file", "", "path to the TLS private key file")
 	s3Options.tlsCertificate = cmdServer.Flag.String("s3.cert.file", "", "path to the TLS certificate file")
 	s3Options.config = cmdServer.Flag.String("s3.config", "", "path to the config file")
+	s3Options.allowEmptyFolder = cmdServer.Flag.Bool("s3.allowEmptyFolder", false, "allow empty folders")
+
+	webdavOptions.port = cmdServer.Flag.Int("webdav.port", 7333, "webdav server http listen port")
+	webdavOptions.collection = cmdServer.Flag.String("webdav.collection", "", "collection to create the files")
+	webdavOptions.replication = cmdServer.Flag.String("webdav.replication", "", "replication to create the files")
+	webdavOptions.disk = cmdServer.Flag.String("webdav.disk", "", "[hdd|ssd|<tag>] hard drive or solid state drive or any tag")
+	webdavOptions.tlsPrivateKey = cmdServer.Flag.String("webdav.key.file", "", "path to the TLS private key file")
+	webdavOptions.tlsCertificate = cmdServer.Flag.String("webdav.cert.file", "", "path to the TLS certificate file")
+	webdavOptions.cacheDir = cmdServer.Flag.String("webdav.cacheDir", os.TempDir(), "local cache directory for file chunks")
+	webdavOptions.cacheSizeMB = cmdServer.Flag.Int64("webdav.cacheCapacityMB", 1000, "local cache capacity in MB")
 
 	msgBrokerOptions.port = cmdServer.Flag.Int("msgBroker.port", 17777, "broker gRPC listen port")
 
@@ -135,23 +150,28 @@ func runServer(cmd *Command, args []string) bool {
 	if *isStartingS3 {
 		*isStartingFiler = true
 	}
+	if *isStartingWebDav {
+		*isStartingFiler = true
+	}
 	if *isStartingMsgBroker {
 		*isStartingFiler = true
 	}
 
-	_, peerList := checkPeers(*serverIp, *masterOptions.port, *masterOptions.peers)
-	peers := strings.Join(peerList, ",")
-	masterOptions.peers = &peers
+	if *isStartingMasterServer {
+		_, peerList := checkPeers(*serverIp, *masterOptions.port, *masterOptions.peers)
+		peers := strings.Join(peerList, ",")
+		masterOptions.peers = &peers
+	}
 
 	// ip address
 	masterOptions.ip = serverIp
 	masterOptions.ipBind = serverBindIp
-	filerOptions.masters = &peers
+	filerOptions.masters = masterOptions.peers
 	filerOptions.ip = serverIp
 	filerOptions.bindIp = serverBindIp
 	serverOptions.v.ip = serverIp
 	serverOptions.v.bindIp = serverBindIp
-	serverOptions.v.masters = &peers
+	serverOptions.v.masters = masterOptions.peers
 	serverOptions.v.idleConnectionTimeout = serverTimeout
 	serverOptions.v.dataCenter = serverDataCenter
 	serverOptions.v.rack = serverRack
@@ -169,6 +189,7 @@ func runServer(cmd *Command, args []string) bool {
 
 	filerAddress := fmt.Sprintf("%s:%d", *serverIp, *filerOptions.port)
 	s3Options.filer = &filerAddress
+	webdavOptions.filer = &filerAddress
 	msgBrokerOptions.filer = &filerAddress
 
 	runtime.GOMAXPROCS(runtime.NumCPU())
@@ -210,6 +231,15 @@ func runServer(cmd *Command, args []string) bool {
 		}()
 	}
 
+	if *isStartingWebDav {
+		go func() {
+			time.Sleep(2 * time.Second)
+
+			webdavOptions.startWebDav()
+
+		}()
+	}
+
 	if *isStartingMsgBroker {
 		go func() {
 			time.Sleep(2 * time.Second)
@@ -223,7 +253,11 @@ func runServer(cmd *Command, args []string) bool {
 
 	}
 
-	startMaster(masterOptions, serverWhiteList)
+	if *isStartingMasterServer {
+		go startMaster(masterOptions, serverWhiteList)
+	}
+
+	select {}
 
 	return true
 }

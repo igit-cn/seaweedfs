@@ -3,6 +3,7 @@ package postgres
 import (
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/chrislusf/seaweedfs/weed/filer"
 	"github.com/chrislusf/seaweedfs/weed/filer/abstract_sql"
@@ -33,42 +34,50 @@ func (store *PostgresStore) Initialize(configuration util.Configuration, prefix 
 		configuration.GetString(prefix+"hostname"),
 		configuration.GetInt(prefix+"port"),
 		configuration.GetString(prefix+"database"),
+		configuration.GetString(prefix+"schema"),
 		configuration.GetString(prefix+"sslmode"),
 		configuration.GetInt(prefix+"connection_max_idle"),
 		configuration.GetInt(prefix+"connection_max_open"),
+		configuration.GetInt(prefix+"connection_max_lifetime_seconds"),
 	)
 }
 
-func (store *PostgresStore) initialize(user, password, hostname string, port int, database, sslmode string, maxIdle, maxOpen int) (err error) {
+func (store *PostgresStore) initialize(user, password, hostname string, port int, database, schema, sslmode string, maxIdle, maxOpen, maxLifetimeSeconds int) (err error) {
 
-	store.SqlInsert = "INSERT INTO filemeta (dirhash,name,directory,meta) VALUES($1,$2,$3,$4)"
-	store.SqlUpdate = "UPDATE filemeta SET meta=$1 WHERE dirhash=$2 AND name=$3 AND directory=$4"
-	store.SqlFind = "SELECT meta FROM filemeta WHERE dirhash=$1 AND name=$2 AND directory=$3"
-	store.SqlDelete = "DELETE FROM filemeta WHERE dirhash=$1 AND name=$2 AND directory=$3"
-	store.SqlDeleteFolderChildren = "DELETE FROM filemeta WHERE dirhash=$1 AND directory=$2"
-	store.SqlListExclusive = "SELECT NAME, meta FROM filemeta WHERE dirhash=$1 AND name>$2 AND directory=$3 AND name like $4 ORDER BY NAME ASC LIMIT $5"
-	store.SqlListInclusive = "SELECT NAME, meta FROM filemeta WHERE dirhash=$1 AND name>=$2 AND directory=$3 AND name like $4 ORDER BY NAME ASC LIMIT $5"
+	store.SupportBucketTable = false
+	store.SqlGenerator = &SqlGenPostgres{
+		CreateTableSqlTemplate: "",
+		DropTableSqlTemplate:   `drop table "%s"`,
+	}
 
 	sqlUrl := fmt.Sprintf(CONNECTION_URL_PATTERN, hostname, port, sslmode)
 	if user != "" {
 		sqlUrl += " user=" + user
 	}
+	adaptedSqlUrl := sqlUrl
 	if password != "" {
 		sqlUrl += " password=" + password
+		adaptedSqlUrl += " password=ADAPTED"
 	}
 	if database != "" {
 		sqlUrl += " dbname=" + database
+		adaptedSqlUrl += " dbname=" + database
+	}
+	if schema != "" {
+		sqlUrl += " search_path=" + schema
+		adaptedSqlUrl += " search_path=" + schema
 	}
 	var dbErr error
 	store.DB, dbErr = sql.Open("postgres", sqlUrl)
 	if dbErr != nil {
 		store.DB.Close()
 		store.DB = nil
-		return fmt.Errorf("can not connect to %s error:%v", sqlUrl, err)
+		return fmt.Errorf("can not connect to %s error:%v", adaptedSqlUrl, err)
 	}
 
 	store.DB.SetMaxIdleConns(maxIdle)
 	store.DB.SetMaxOpenConns(maxOpen)
+	store.DB.SetConnMaxLifetime(time.Duration(maxLifetimeSeconds) * time.Second)
 
 	if err = store.DB.Ping(); err != nil {
 		return fmt.Errorf("connect to %s error:%v", sqlUrl, err)

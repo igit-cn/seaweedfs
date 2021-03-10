@@ -11,10 +11,10 @@ import (
 	_ "github.com/chrislusf/seaweedfs/weed/replication/sink/b2sink"
 	_ "github.com/chrislusf/seaweedfs/weed/replication/sink/filersink"
 	_ "github.com/chrislusf/seaweedfs/weed/replication/sink/gcssink"
+	_ "github.com/chrislusf/seaweedfs/weed/replication/sink/localsink"
 	_ "github.com/chrislusf/seaweedfs/weed/replication/sink/s3sink"
 	"github.com/chrislusf/seaweedfs/weed/replication/sub"
 	"github.com/chrislusf/seaweedfs/weed/util"
-	"github.com/spf13/viper"
 )
 
 func init() {
@@ -74,18 +74,7 @@ func runFilerReplicate(cmd *Command, args []string) bool {
 		}
 	}
 
-	var dataSink sink.ReplicationSink
-	for _, sk := range sink.Sinks {
-		if config.GetBool("sink." + sk.GetName() + ".enabled") {
-			if err := sk.Initialize(config, "sink."+sk.GetName()+"."); err != nil {
-				glog.Fatalf("Failed to initialize sink for %s: %+v",
-					sk.GetName(), err)
-			}
-			glog.V(0).Infof("Configure sink to %s", sk.GetName())
-			dataSink = sk
-			break
-		}
-	}
+	dataSink := findSink(config)
 
 	if dataSink == nil {
 		println("no data sink configured in replication.toml:")
@@ -98,13 +87,19 @@ func runFilerReplicate(cmd *Command, args []string) bool {
 	replicator := replication.NewReplicator(config, "source.filer.", dataSink)
 
 	for {
-		key, m, err := notificationInput.ReceiveMessage()
+		key, m, onSuccessFn, onFailureFn, err := notificationInput.ReceiveMessage()
 		if err != nil {
 			glog.Errorf("receive %s: %+v", key, err)
+			if onFailureFn != nil {
+				onFailureFn()
+			}
 			continue
 		}
 		if key == "" {
 			// long poll received no messages
+			if onSuccessFn != nil {
+				onSuccessFn()
+			}
 			continue
 		}
 		if m.OldEntry != nil && m.NewEntry == nil {
@@ -116,14 +111,36 @@ func runFilerReplicate(cmd *Command, args []string) bool {
 		}
 		if err = replicator.Replicate(context.Background(), key, m); err != nil {
 			glog.Errorf("replicate %s: %+v", key, err)
+			if onFailureFn != nil {
+				onFailureFn()
+			}
 		} else {
 			glog.V(1).Infof("replicated %s", key)
+			if onSuccessFn != nil {
+				onSuccessFn()
+			}
 		}
 	}
 
 }
 
-func validateOneEnabledInput(config *viper.Viper) {
+func findSink(config *util.ViperProxy) sink.ReplicationSink {
+	var dataSink sink.ReplicationSink
+	for _, sk := range sink.Sinks {
+		if config.GetBool("sink." + sk.GetName() + ".enabled") {
+			if err := sk.Initialize(config, "sink."+sk.GetName()+"."); err != nil {
+				glog.Fatalf("Failed to initialize sink for %s: %+v",
+					sk.GetName(), err)
+			}
+			glog.V(0).Infof("Configure sink to %s", sk.GetName())
+			dataSink = sk
+			break
+		}
+	}
+	return dataSink
+}
+
+func validateOneEnabledInput(config *util.ViperProxy) {
 	enabledInput := ""
 	for _, input := range sub.NotificationInputs {
 		if config.GetBool("notification." + input.GetName() + ".enabled") {

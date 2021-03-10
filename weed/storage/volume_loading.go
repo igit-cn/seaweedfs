@@ -14,7 +14,7 @@ import (
 	"github.com/chrislusf/seaweedfs/weed/util"
 )
 
-func loadVolumeWithoutIndex(dirname string, collection string, id needle.VolumeId, needleMapKind NeedleMapType) (v *Volume, err error) {
+func loadVolumeWithoutIndex(dirname string, collection string, id needle.VolumeId, needleMapKind NeedleMapKind) (v *Volume, err error) {
 	v = &Volume{dir: dirname, Collection: collection, Id: id}
 	v.SuperBlock = super_block.SuperBlock{}
 	v.needleMapKind = needleMapKind
@@ -22,7 +22,7 @@ func loadVolumeWithoutIndex(dirname string, collection string, id needle.VolumeI
 	return
 }
 
-func (v *Volume) load(alsoLoadIndex bool, createDatIfMissing bool, needleMapKind NeedleMapType, preallocate int64) (err error) {
+func (v *Volume) load(alsoLoadIndex bool, createDatIfMissing bool, needleMapKind NeedleMapKind, preallocate int64) (err error) {
 	alreadyHasSuperBlock := false
 
 	hasLoadedVolume := false
@@ -39,12 +39,12 @@ func (v *Volume) load(alsoLoadIndex bool, createDatIfMissing bool, needleMapKind
 		}
 	}()
 
-	hasVolumeInfoFile := v.maybeLoadVolumeInfo() && v.volumeInfo.Version != 0
+	hasVolumeInfoFile := v.maybeLoadVolumeInfo()
 
 	if v.HasRemoteFile() {
 		v.noWriteCanDelete = true
 		v.noWriteOrDelete = false
-		glog.V(0).Infof("loading volume %d from remote %v", v.Id, v.volumeInfo.Files)
+		glog.V(0).Infof("loading volume %d from remote %v", v.Id, v.volumeInfo)
 		v.LoadRemoteFile()
 		alreadyHasSuperBlock = true
 	} else if exists, canRead, canWrite, modifiedTime, fileSize := util.CheckFile(v.FileName(".dat")); exists {
@@ -83,6 +83,12 @@ func (v *Volume) load(alsoLoadIndex bool, createDatIfMissing bool, needleMapKind
 
 	if alreadyHasSuperBlock {
 		err = v.readSuperBlock()
+		glog.V(0).Infof("readSuperBlock volume %d version %v", v.Id, v.SuperBlock.Version)
+		if v.HasRemoteFile() {
+			// maybe temporary network problem
+			glog.Errorf("readSuperBlock remote volume %d: %v", v.Id, err)
+			err = nil
+		}
 	} else {
 		if !v.SuperBlock.Initialized() {
 			return fmt.Errorf("volume %s not initialized", v.FileName(".dat"))
@@ -95,6 +101,10 @@ func (v *Volume) load(alsoLoadIndex bool, createDatIfMissing bool, needleMapKind
 			if util.FileExists(v.DataFileName() + ".idx") {
 				v.dirIdx = v.dir
 			}
+		}
+		// check volume idx files
+		if err := v.checkIdxFile(); err != nil {
+			glog.Fatalf("check volume idx file %s: %v", v.FileName(".idx"), err)
 		}
 		var indexFile *os.File
 		if v.noWriteOrDelete {

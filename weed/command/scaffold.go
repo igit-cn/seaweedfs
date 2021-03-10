@@ -44,6 +44,8 @@ func runScaffold(cmd *Command, args []string) bool {
 		content = SECURITY_TOML_EXAMPLE
 	case "master":
 		content = MASTER_TOML_EXAMPLE
+	case "shell":
+		content = SHELL_TOML_EXAMPLE
 	}
 	if content == "" {
 		println("need a valid -config option")
@@ -85,9 +87,21 @@ buckets_folder = "/buckets"
 # local on disk, mostly for simple single-machine setup, fairly scalable
 # faster than previous leveldb, recommended.
 enabled = true
-dir = "."					# directory to store level db files
+dir = "./filerldb2"					# directory to store level db files
 
-[mysql]  # or tidb
+[leveldb3]
+# similar to leveldb2.
+# each bucket has its own meta store.
+enabled = false
+dir = "./filerldb3"					# directory to store level db files
+
+[rocksdb]
+# local on disk, similar to leveldb
+# since it is using a C wrapper, you need to install rocksdb and build it by yourself
+enabled = false
+dir = "./filerrdb"					# directory to store rocksdb files
+
+[mysql]  # or memsql, tidb
 # CREATE TABLE IF NOT EXISTS filemeta (
 #   dirhash     BIGINT         COMMENT 'first 64 bits of MD5 hash value of directory field',
 #   name        VARCHAR(1000)  COMMENT 'directory or file name',
@@ -104,9 +118,31 @@ password = ""
 database = ""              # create or use an existing database
 connection_max_idle = 2
 connection_max_open = 100
+connection_max_lifetime_seconds = 0
 interpolateParams = false
 
-[postgres] # or cockroachdb
+[mysql2]  # or memsql, tidb
+enabled = false
+createTable = """
+  CREATE TABLE IF NOT EXISTS ` + "`%s`" + ` (
+    dirhash BIGINT,
+    name VARCHAR(1000),
+    directory TEXT,
+    meta LONGBLOB,
+    PRIMARY KEY (dirhash, name)
+  ) DEFAULT CHARSET=utf8;
+"""
+hostname = "localhost"
+port = 3306
+username = "root"
+password = ""
+database = ""              # create or use an existing database
+connection_max_idle = 2
+connection_max_open = 100
+connection_max_lifetime_seconds = 0
+interpolateParams = false
+
+[postgres] # or cockroachdb, YugabyteDB
 # CREATE TABLE IF NOT EXISTS filemeta (
 #   dirhash     BIGINT,
 #   name        VARCHAR(65535),
@@ -119,10 +155,34 @@ hostname = "localhost"
 port = 5432
 username = "postgres"
 password = ""
-database = ""              # create or use an existing database
+database = "postgres"          # create or use an existing database
+schema = ""
 sslmode = "disable"
 connection_max_idle = 100
 connection_max_open = 100
+connection_max_lifetime_seconds = 0
+
+[postgres2]
+enabled = false
+createTable = """
+  CREATE TABLE IF NOT EXISTS "%s" (
+    dirhash   BIGINT, 
+    name      VARCHAR(65535), 
+    directory VARCHAR(65535), 
+    meta      bytea, 
+    PRIMARY KEY (dirhash, name)
+  );
+"""
+hostname = "localhost"
+port = 5432
+username = "postgres"
+password = ""
+database = "postgres"          # create or use an existing database
+schema = ""
+sslmode = "disable"
+connection_max_idle = 100
+connection_max_open = 100
+connection_max_lifetime_seconds = 0
 
 [cassandra]
 # CREATE TABLE filemeta (
@@ -166,9 +226,9 @@ addresses = [
 ]
 password = ""
 # allows reads from slave servers or the master, but all writes still go to the master
-readOnly = true
+readOnly = false
 # automatically use the closest Redis server for reads
-routeByLatency = true
+routeByLatency = false
 # This changes the data layout. Only add new directories. Removing/Updating will cause data loss.
 superLargeDirectories = []
 
@@ -271,7 +331,8 @@ enabled = false
 # This URL will Dial the RabbitMQ server at the URL in the environment
 # variable RABBIT_SERVER_URL and open the exchange "myexchange".
 # The exchange must have already been created by some other means, like
-# the RabbitMQ management plugin.
+# the RabbitMQ management plugin. Сreate myexchange of type fanout and myqueue then
+# create binding myexchange => myqueue
 topic_url = "rabbit://myexchange"
 sub_url = "rabbit://myqueue"
 `
@@ -292,6 +353,19 @@ grpcAddress = "localhost:18888"
 # i.e., all files with this "prefix" are sent to notification message queue.
 directory = "/buckets"
 
+[sink.local]
+enabled = false
+directory = "/data"
+# all replicated files are under modified time as yyyy-mm-dd directories
+# so each date directory contains all new and updated files.
+is_incremental = false
+
+[sink.local_incremental]
+# all replicated files are under modified time as yyyy-mm-dd directories
+# so each date directory contains all new and updated files.
+enabled = false
+directory = "/backup"
+
 [sink.filer]
 enabled = false
 grpcAddress = "localhost:18888"
@@ -302,6 +376,7 @@ directory = "/backup"
 replication = ""
 collection = ""
 ttlSec = 0
+is_incremental = false
 
 [sink.s3]
 # read credentials doc at https://docs.aws.amazon.com/sdk-for-go/v1/developer-guide/sessions.html
@@ -313,6 +388,7 @@ region = "us-east-2"
 bucket = "your_bucket_name"    # an existing bucket
 directory = "/"                # destination directory
 endpoint = ""
+is_incremental = false
 
 [sink.google_cloud_storage]
 # read credentials doc at https://cloud.google.com/docs/authentication/getting-started
@@ -320,6 +396,7 @@ enabled = false
 google_application_credentials = "/path/to/x.json" # path to json credential file
 bucket = "your_bucket_seaweedfs"    # an existing bucket
 directory = "/"                     # destination directory
+is_incremental = false
 
 [sink.azure]
 # experimental, let me know if it works
@@ -328,6 +405,7 @@ account_name = ""
 account_key  = ""
 container = "mycontainer"      # an existing container
 directory = "/"                # destination directory
+is_incremental = false
 
 [sink.backblaze]
 enabled = false
@@ -335,6 +413,7 @@ b2_account_id = ""
 b2_master_application_key  = ""
 bucket = "mybucket"            # an existing bucket
 directory = "/"                # destination directory
+is_incremental = false
 
 `
 
@@ -458,6 +537,20 @@ copy_other = 1            # create n x 1 = n actual volumes
 # try to replicate to all available volumes. You should only use this option
 # if you are doing your own replication or periodic sync of volumes.
 treat_replication_as_minimums = false
+
+`
+	SHELL_TOML_EXAMPLE = `
+
+[cluster]
+default = "c1"
+
+[cluster.c1]
+master = "localhost:9333"    # comma-separated master servers
+filer = "localhost:8888"     # filer host and port
+
+[cluster.c2]
+master = ""
+filer = ""
 
 `
 )

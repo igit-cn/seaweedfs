@@ -55,7 +55,10 @@ func (f *Filer) NotifyUpdateEvent(ctx context.Context, oldEntry, newEntry *Entry
 
 	if notification.Queue != nil {
 		glog.V(3).Infof("notifying entry update %v", fullpath)
-		notification.Queue.SendMessage(fullpath, eventNotification)
+		if err := notification.Queue.SendMessage(fullpath, eventNotification); err != nil {
+			// throw message
+			glog.Error(err)
+		}
 	}
 
 	f.logMetaEvent(ctx, fullpath, eventNotification)
@@ -113,13 +116,13 @@ func (f *Filer) ReadPersistedLogBuffer(startTime time.Time, eachLogEntryFn func(
 	sizeBuf := make([]byte, 4)
 	startTsNs := startTime.UnixNano()
 
-	dayEntries, listDayErr := f.ListDirectoryEntries(context.Background(), SystemLogDir, startDate, true, 366, "")
+	dayEntries, _, listDayErr := f.ListDirectoryEntries(context.Background(), SystemLogDir, startDate, true, 366, "", "")
 	if listDayErr != nil {
 		return lastTsNs, fmt.Errorf("fail to list log by day: %v", listDayErr)
 	}
 	for _, dayEntry := range dayEntries {
 		// println("checking day", dayEntry.FullPath)
-		hourMinuteEntries, listHourMinuteErr := f.ListDirectoryEntries(context.Background(), util.NewFullPath(SystemLogDir, dayEntry.Name()), "", false, 24*60, "")
+		hourMinuteEntries, _, listHourMinuteErr := f.ListDirectoryEntries(context.Background(), util.NewFullPath(SystemLogDir, dayEntry.Name()), "", false, 24*60, "", "")
 		if listHourMinuteErr != nil {
 			return lastTsNs, fmt.Errorf("fail to list log %s by day: %v", dayEntry.Name(), listHourMinuteErr)
 		}
@@ -170,7 +173,7 @@ func ReadEachLogEntry(r io.Reader, sizeBuf []byte, ns int64, eachLogEntryFn func
 			return lastTsNs, err
 		}
 		if logEntry.TsNs <= ns {
-			return lastTsNs, nil
+			continue
 		}
 		// println("each log: ", logEntry.TsNs)
 		if err := eachLogEntryFn(logEntry); err != nil {

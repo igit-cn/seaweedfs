@@ -3,6 +3,9 @@ package filesys
 import (
 	"context"
 	"fmt"
+	"github.com/chrislusf/seaweedfs/weed/filer"
+	"github.com/chrislusf/seaweedfs/weed/storage/types"
+	"github.com/chrislusf/seaweedfs/weed/wdclient"
 	"math"
 	"os"
 	"path"
@@ -24,12 +27,15 @@ import (
 )
 
 type Option struct {
+	MountDirectory     string
+	FilerAddress       string
 	FilerGrpcAddress   string
 	GrpcDialOption     grpc.DialOption
 	FilerMountRootPath string
 	Collection         string
 	Replication        string
 	TtlSec             int32
+	DiskType           types.DiskType
 	ChunkSizeLimit     int64
 	ConcurrentWriters  int
 	CacheDir           string
@@ -44,9 +50,9 @@ type Option struct {
 	MountCtime time.Time
 	MountMtime time.Time
 
-	OutsideContainerClusterMode bool // whether the mount runs outside SeaweedFS containers
-	Cipher                      bool // whether encrypt data on volume server
-	UidGidMapper                *meta_cache.UidGidMapper
+	VolumeServerAccess string // how to access volume servers
+	Cipher             bool   // whether encrypt data on volume server
+	UidGidMapper       *meta_cache.UidGidMapper
 }
 
 var _ = fs.FS(&WFS{})
@@ -72,6 +78,7 @@ type WFS struct {
 
 	// throttle writers
 	concurrentWriters *util.LimitedConcurrentExecutor
+	Server            *fs.Server
 }
 type statsCache struct {
 	filer_pb.StatisticsResponse
@@ -89,7 +96,7 @@ func NewSeaweedFileSystem(option *Option) *WFS {
 		},
 		signature: util.RandomInt32(),
 	}
-	cacheUniqueId := util.Md5String([]byte(option.FilerGrpcAddress + option.FilerMountRootPath + util.Version()))[0:4]
+	cacheUniqueId := util.Md5String([]byte(option.MountDirectory + option.FilerGrpcAddress + option.FilerMountRootPath + util.Version()))[0:8]
 	cacheDir := path.Join(option.CacheDir, cacheUniqueId)
 	if option.CacheSizeMB > 0 {
 		os.MkdirAll(cacheDir, os.FileMode(0777)&^option.Umask)
@@ -100,7 +107,20 @@ func NewSeaweedFileSystem(option *Option) *WFS {
 		fsNode := wfs.fsNodeCache.GetFsNode(filePath)
 		if fsNode != nil {
 			if file, ok := fsNode.(*File); ok {
+				if err := wfs.Server.InvalidateNodeData(file); err != nil {
+					glog.V(4).Infof("InvalidateNodeData %s : %v", filePath, err)
+				}
 				file.clearEntry()
+			}
+		}
+		dir, name := filePath.DirAndName()
+		parent := wfs.root
+		if dir != "/" {
+			parent = wfs.fsNodeCache.GetFsNode(util.FullPath(dir))
+		}
+		if parent != nil {
+			if err := wfs.Server.InvalidateEntry(parent, name); err != nil {
+				glog.V(4).Infof("InvalidateEntry %s : %v", filePath, err)
 			}
 		}
 	})
@@ -176,6 +196,7 @@ func (wfs *WFS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.
 				Collection:  wfs.option.Collection,
 				Replication: wfs.option.Replication,
 				Ttl:         fmt.Sprintf("%ds", wfs.option.TtlSec),
+				DiskType:    string(wfs.option.DiskType),
 			}
 
 			glog.V(4).Infof("reading filer stats: %+v", request)
@@ -236,4 +257,14 @@ func (wfs *WFS) mapPbIdFromLocalToFiler(entry *filer_pb.Entry) {
 		return
 	}
 	entry.Attributes.Uid, entry.Attributes.Gid = wfs.option.UidGidMapper.LocalToFiler(entry.Attributes.Uid, entry.Attributes.Gid)
+}
+
+func (wfs *WFS) LookupFn() wdclient.LookupFileIdFunctionType {
+	if wfs.option.VolumeServerAccess == "filerProxy" {
+		return func(fileId string) (targetUrls []string, err error) {
+			return []string{"http://" + wfs.option.FilerAddress + "/?proxyChunkId=" + fileId}, nil
+		}
+	}
+	return filer.LookupFn(wfs)
+
 }

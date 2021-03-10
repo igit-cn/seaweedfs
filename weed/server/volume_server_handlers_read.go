@@ -23,7 +23,7 @@ import (
 	"github.com/chrislusf/seaweedfs/weed/util"
 )
 
-var fileNameEscaper = strings.NewReplacer("\\", "\\\\", "\"", "\\\"")
+var fileNameEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 
 func (vs *VolumeServer) GetOrHeadHandler(w http.ResponseWriter, r *http.Request) {
 
@@ -63,7 +63,7 @@ func (vs *VolumeServer) GetOrHeadHandler(w http.ResponseWriter, r *http.Request)
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		lookupResult, err := operation.Lookup(vs.GetMaster(), volumeId.String())
+		lookupResult, err := operation.Lookup(vs.GetMaster, volumeId.String())
 		glog.V(2).Infoln("volume", volumeId, "found on", lookupResult, "error", err)
 		if err == nil && len(lookupResult.Locations) > 0 {
 			u, _ := url.Parse(util.NormalizeUrl(lookupResult.Locations[0].PublicUrl))
@@ -261,9 +261,12 @@ func writeResponseContent(filename, mimeType string, rs io.ReadSeeker, w http.Re
 		return nil
 	}
 
-	processRangeRequest(r, w, totalSize, mimeType, func(writer io.Writer, offset int64, size int64) error {
+	processRangeRequest(r, w, totalSize, mimeType, func(writer io.Writer, offset int64, size int64, httpStatusCode int) error {
 		if _, e = rs.Seek(offset, 0); e != nil {
 			return e
+		}
+		if httpStatusCode != 0 {
+			w.WriteHeader(httpStatusCode)
 		}
 		_, e = io.CopyN(writer, rs, size)
 		return e

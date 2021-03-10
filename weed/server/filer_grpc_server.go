@@ -44,7 +44,7 @@ func (fs *FilerServer) LookupDirectoryEntry(ctx context.Context, req *filer_pb.L
 	}, nil
 }
 
-func (fs *FilerServer) ListEntries(req *filer_pb.ListEntriesRequest, stream filer_pb.SeaweedFiler_ListEntriesServer) error {
+func (fs *FilerServer) ListEntries(req *filer_pb.ListEntriesRequest, stream filer_pb.SeaweedFiler_ListEntriesServer) (err error) {
 
 	glog.V(4).Infof("ListEntries %v", req)
 
@@ -60,23 +60,12 @@ func (fs *FilerServer) ListEntries(req *filer_pb.ListEntriesRequest, stream file
 
 	lastFileName := req.StartFromFileName
 	includeLastFile := req.InclusiveStartFrom
+	var listErr error
 	for limit > 0 {
-		entries, err := fs.filer.ListDirectoryEntries(stream.Context(), util.FullPath(req.Directory), lastFileName, includeLastFile, paginationLimit, req.Prefix)
-
-		if err != nil {
-			return err
-		}
-		if len(entries) == 0 {
-			return nil
-		}
-
-		includeLastFile = false
-
-		for _, entry := range entries {
-
-			lastFileName = entry.Name()
-
-			if err := stream.Send(&filer_pb.ListEntriesResponse{
+		var hasEntries bool
+		lastFileName, listErr = fs.filer.StreamListDirectoryEntries(stream.Context(), util.FullPath(req.Directory), lastFileName, includeLastFile, int64(paginationLimit), req.Prefix, "", func(entry *filer.Entry) bool {
+			hasEntries = true
+			if err = stream.Send(&filer_pb.ListEntriesResponse{
 				Entry: &filer_pb.Entry{
 					Name:            entry.Name(),
 					IsDirectory:     entry.IsDirectory(),
@@ -88,18 +77,27 @@ func (fs *FilerServer) ListEntries(req *filer_pb.ListEntriesRequest, stream file
 					Content:         entry.Content,
 				},
 			}); err != nil {
-				return err
+				return false
 			}
 
 			limit--
 			if limit == 0 {
-				return nil
+				return false
 			}
+			return true
+		})
+
+		if listErr != nil {
+			return listErr
+		}
+		if err != nil {
+			return err
+		}
+		if !hasEntries {
+			return nil
 		}
 
-		if len(entries) < paginationLimit {
-			break
-		}
+		includeLastFile = false
 
 	}
 
@@ -265,6 +263,7 @@ func (fs *FilerServer) cleanupChunks(fullpath string, existingEntry *filer.Entry
 			newEntry.Attributes.Collection,
 			newEntry.Attributes.Replication,
 			newEntry.Attributes.TtlSec,
+			newEntry.Attributes.DiskType,
 			"",
 			"",
 		)
@@ -308,7 +307,7 @@ func (fs *FilerServer) AppendToEntry(ctx context.Context, req *filer_pb.AppendTo
 	}
 
 	entry.Chunks = append(entry.Chunks, req.Chunks...)
-	so := fs.detectStorageOption(string(fullpath), entry.Collection, entry.Replication, entry.TtlSec, "", "")
+	so := fs.detectStorageOption(string(fullpath), entry.Collection, entry.Replication, entry.TtlSec, entry.DiskType, "", "")
 	entry.Chunks, err = filer.MaybeManifestize(fs.saveAsChunk(so), entry.Chunks)
 	if err != nil {
 		// not good, but should be ok
@@ -326,7 +325,7 @@ func (fs *FilerServer) DeleteEntry(ctx context.Context, req *filer_pb.DeleteEntr
 
 	err = fs.filer.DeleteEntryMetaAndData(ctx, util.JoinPath(req.Directory, req.Name), req.IsRecursive, req.IgnoreRecursiveError, req.IsDeleteData, req.IsFromOtherCluster, req.Signatures)
 	resp = &filer_pb.DeleteEntryResponse{}
-	if err != nil {
+	if err != nil && err != filer_pb.ErrNotFound {
 		resp.Error = err.Error()
 	}
 	return resp, nil
@@ -334,11 +333,11 @@ func (fs *FilerServer) DeleteEntry(ctx context.Context, req *filer_pb.DeleteEntr
 
 func (fs *FilerServer) AssignVolume(ctx context.Context, req *filer_pb.AssignVolumeRequest) (resp *filer_pb.AssignVolumeResponse, err error) {
 
-	so := fs.detectStorageOption(req.Path, req.Collection, req.Replication, req.TtlSec, req.DataCenter, req.Rack)
+	so := fs.detectStorageOption(req.Path, req.Collection, req.Replication, req.TtlSec, req.DiskType, req.DataCenter, req.Rack)
 
 	assignRequest, altRequest := so.ToAssignRequests(int(req.Count))
 
-	assignResult, err := operation.Assign(fs.filer.GetMaster(), fs.grpcDialOption, assignRequest, altRequest)
+	assignResult, err := operation.Assign(fs.filer.GetMaster, fs.grpcDialOption, assignRequest, altRequest)
 	if err != nil {
 		glog.V(3).Infof("AssignVolume: %v", err)
 		return &filer_pb.AssignVolumeResponse{Error: fmt.Sprintf("assign volume: %v", err)}, nil
@@ -404,6 +403,7 @@ func (fs *FilerServer) Statistics(ctx context.Context, req *filer_pb.StatisticsR
 			Replication: req.Replication,
 			Collection:  req.Collection,
 			Ttl:         req.Ttl,
+			DiskType:    req.DiskType,
 		})
 		if grpcErr != nil {
 			return grpcErr

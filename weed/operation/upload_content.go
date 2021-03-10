@@ -31,6 +31,7 @@ type UploadResult struct {
 	Mime       string `json:"mime,omitempty"`
 	Gzip       uint32 `json:"gzip,omitempty"`
 	ContentMd5 string `json:"contentMd5,omitempty"`
+	RetryCount int    `json:"-"`
 }
 
 func (uploadResult *UploadResult) ToPbFileChunk(fileId string, offset int64) *filer_pb.FileChunk {
@@ -58,11 +59,12 @@ var (
 
 func init() {
 	HttpClient = &http.Client{Transport: &http.Transport{
+		MaxIdleConns:        1024,
 		MaxIdleConnsPerHost: 1024,
 	}}
 }
 
-var fileNameEscaper = strings.NewReplacer("\\", "\\\\", "\"", "\\\"")
+var fileNameEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 
 // Upload sends a POST request to a volume server to upload the content with adjustable compression level
 func UploadData(uploadUrl string, filename string, cipher bool, data []byte, isInputCompressed bool, mtype string, pairMap map[string]string, jwt security.EncodedJwt) (uploadResult *UploadResult, err error) {
@@ -95,10 +97,12 @@ func retriedUploadData(uploadUrl string, filename string, cipher bool, data []by
 	for i := 0; i < 3; i++ {
 		uploadResult, err = doUploadData(uploadUrl, filename, cipher, data, isInputCompressed, mtype, pairMap, jwt)
 		if err == nil {
+			uploadResult.RetryCount = i
 			return
 		} else {
 			glog.Warningf("uploading to %s: %v", uploadUrl, err)
 		}
+		time.Sleep(time.Millisecond * time.Duration(237*(i+1)))
 	}
 	return
 }
@@ -128,7 +132,8 @@ func doUploadData(uploadUrl string, filename string, cipher bool, data []byte, i
 	// gzip if possible
 	// this could be double copying
 	clearDataLen = len(data)
-	if shouldGzipNow {
+	clearData := data
+	if shouldGzipNow && !cipher {
 		compressed, compressErr := util.GzipData(data)
 		// fmt.Printf("data is compressed from %d ==> %d\n", len(data), len(compressed))
 		if compressErr == nil {
@@ -137,7 +142,7 @@ func doUploadData(uploadUrl string, filename string, cipher bool, data []byte, i
 		}
 	} else if isInputCompressed {
 		// just to get the clear data length
-		clearData, err := util.DecompressData(data)
+		clearData, err = util.DecompressData(data)
 		if err == nil {
 			clearDataLen = len(clearData)
 		}
@@ -148,7 +153,7 @@ func doUploadData(uploadUrl string, filename string, cipher bool, data []byte, i
 
 		// encrypt
 		cipherKey := util.GenCipherKey()
-		encryptedData, encryptionErr := util.Encrypt(data, cipherKey)
+		encryptedData, encryptionErr := util.Encrypt(clearData, cipherKey)
 		if encryptionErr != nil {
 			err = fmt.Errorf("encrypt input: %v", encryptionErr)
 			return
@@ -159,26 +164,26 @@ func doUploadData(uploadUrl string, filename string, cipher bool, data []byte, i
 			_, err = w.Write(encryptedData)
 			return
 		}, "", false, len(encryptedData), "", nil, jwt)
-		if uploadResult != nil {
-			uploadResult.Name = filename
-			uploadResult.Mime = mtype
-			uploadResult.CipherKey = cipherKey
+		if uploadResult == nil {
+			return
 		}
+		uploadResult.Name = filename
+		uploadResult.Mime = mtype
+		uploadResult.CipherKey = cipherKey
+		uploadResult.Size = uint32(clearDataLen)
 	} else {
 		// upload data
 		uploadResult, err = upload_content(uploadUrl, func(w io.Writer) (err error) {
 			_, err = w.Write(data)
 			return
 		}, filename, contentIsGzipped, len(data), mtype, pairMap, jwt)
-	}
-
-	if uploadResult == nil {
-		return
-	}
-
-	uploadResult.Size = uint32(clearDataLen)
-	if contentIsGzipped {
-		uploadResult.Gzip = 1
+		if uploadResult == nil {
+			return
+		}
+		uploadResult.Size = uint32(clearDataLen)
+		if contentIsGzipped {
+			uploadResult.Gzip = 1
+		}
 	}
 
 	return uploadResult, err

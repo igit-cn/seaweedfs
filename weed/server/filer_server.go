@@ -26,9 +26,12 @@ import (
 	_ "github.com/chrislusf/seaweedfs/weed/filer/hbase"
 	_ "github.com/chrislusf/seaweedfs/weed/filer/leveldb"
 	_ "github.com/chrislusf/seaweedfs/weed/filer/leveldb2"
+	_ "github.com/chrislusf/seaweedfs/weed/filer/leveldb3"
 	_ "github.com/chrislusf/seaweedfs/weed/filer/mongodb"
 	_ "github.com/chrislusf/seaweedfs/weed/filer/mysql"
+	_ "github.com/chrislusf/seaweedfs/weed/filer/mysql2"
 	_ "github.com/chrislusf/seaweedfs/weed/filer/postgres"
+	_ "github.com/chrislusf/seaweedfs/weed/filer/postgres2"
 	_ "github.com/chrislusf/seaweedfs/weed/filer/redis"
 	_ "github.com/chrislusf/seaweedfs/weed/filer/redis2"
 	"github.com/chrislusf/seaweedfs/weed/glog"
@@ -56,7 +59,7 @@ type FilerOption struct {
 	Port               uint32
 	recursiveDelete    bool
 	Cipher             bool
-	CacheToFilerLimit  int64
+	SaveToFilerLimit   int
 	Filers             []string
 }
 
@@ -150,7 +153,7 @@ func NewFilerServer(defaultMux, readonlyMux *http.ServeMux, option *FilerOption)
 func (fs *FilerServer) checkWithMaster() {
 
 	for _, master := range fs.option.Masters {
-		_, err := pb.ParseFilerGrpcAddress(master)
+		_, err := pb.ParseServerToGrpcAddress(master)
 		if err != nil {
 			glog.Fatalf("invalid master address %s: %v", master, err)
 		}

@@ -1,8 +1,8 @@
 package command
 
 import (
-	"flag"
 	"fmt"
+	flag "github.com/chrislusf/seaweedfs/weed/util/fla9"
 	"os"
 	"strings"
 )
@@ -15,6 +15,10 @@ var Commands = []*Command{
 	cmdDownload,
 	cmdExport,
 	cmdFiler,
+	cmdFilerBackup,
+	cmdFilerCat,
+	cmdFilerMetaBackup,
+	cmdFilerMetaTail,
 	cmdFilerReplicate,
 	cmdFilerSynchronize,
 	cmdFix,
@@ -25,7 +29,6 @@ var Commands = []*Command{
 	cmdScaffold,
 	cmdServer,
 	cmdShell,
-	cmdWatch,
 	cmdUpload,
 	cmdVersion,
 	cmdVolume,
