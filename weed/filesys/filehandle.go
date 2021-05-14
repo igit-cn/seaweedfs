@@ -20,7 +20,7 @@ import (
 
 type FileHandle struct {
 	// cache file has been written to
-	dirtyPages     *ContinuousDirtyPages
+	dirtyPages     DirtyPages
 	entryViewCache []filer.VisibleInterval
 	reader         io.ReaderAt
 	contentType    string
@@ -32,13 +32,14 @@ type FileHandle struct {
 	NodeId    fuse.NodeID    // file or directory the request is about
 	Uid       uint32         // user ID of process making request
 	Gid       uint32         // group ID of process making request
-
+	writeOnly bool
 }
 
-func newFileHandle(file *File, uid, gid uint32) *FileHandle {
+func newFileHandle(file *File, uid, gid uint32, writeOnly bool) *FileHandle {
 	fh := &FileHandle{
 		f:          file,
-		dirtyPages: newDirtyPages(file),
+		// dirtyPages: newContinuousDirtyPages(file, writeOnly),
+		dirtyPages: newTempFileDirtyPages(file, writeOnly),
 		Uid:        uid,
 		Gid:        gid,
 	}
@@ -148,7 +149,7 @@ func (fh *FileHandle) readFromChunks(buff []byte, offset int64) (int64, error) {
 		glog.Errorf("file handle read %s: %v", fileFullPath, err)
 	}
 
-	glog.V(4).Infof("file handle read %s [%d,%d] %d : %v", fileFullPath, offset, offset+int64(totalRead), totalRead, err)
+	// glog.V(4).Infof("file handle read %s [%d,%d] %d : %v", fileFullPath, offset, offset+int64(totalRead), totalRead, err)
 
 	return int64(totalRead), err
 }
@@ -174,7 +175,7 @@ func (fh *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *f
 
 	entry.Content = nil
 	entry.Attributes.FileSize = uint64(max(req.Offset+int64(len(data)), int64(entry.Attributes.FileSize)))
-	glog.V(4).Infof("%v write [%d,%d) %d", fh.f.fullpath(), req.Offset, req.Offset+int64(len(req.Data)), len(req.Data))
+	// glog.V(4).Infof("%v write [%d,%d) %d", fh.f.fullpath(), req.Offset, req.Offset+int64(len(req.Data)), len(req.Data))
 
 	fh.dirtyPages.AddPage(req.Offset, data)
 
@@ -238,12 +239,8 @@ func (fh *FileHandle) doFlush(ctx context.Context, header fuse.Header) error {
 	// send the data to the OS
 	glog.V(4).Infof("doFlush %s fh %d", fh.f.fullpath(), fh.handle)
 
-	fh.dirtyPages.saveExistingPagesToStorage()
-
-	fh.dirtyPages.writeWaitGroup.Wait()
-
-	if fh.dirtyPages.lastErr != nil {
-		glog.Errorf("%v doFlush last err: %v", fh.f.fullpath(), fh.dirtyPages.lastErr)
+	if err := fh.dirtyPages.FlushData(); err != nil {
+		glog.Errorf("%v doFlush: %v", fh.f.fullpath(), err)
 		return fuse.EIO
 	}
 
@@ -271,8 +268,7 @@ func (fh *FileHandle) doFlush(ctx context.Context, header fuse.Header) error {
 			}
 			entry.Attributes.Mtime = time.Now().Unix()
 			entry.Attributes.FileMode = uint32(os.FileMode(entry.Attributes.FileMode) &^ fh.f.wfs.option.Umask)
-			entry.Attributes.Collection = fh.dirtyPages.collection
-			entry.Attributes.Replication = fh.dirtyPages.replication
+			entry.Attributes.Collection, entry.Attributes.Replication = fh.dirtyPages.GetStorageOptions()
 		}
 
 		request := &filer_pb.CreateEntryRequest{
@@ -289,7 +285,7 @@ func (fh *FileHandle) doFlush(ctx context.Context, header fuse.Header) error {
 		manifestChunks, nonManifestChunks := filer.SeparateManifestChunks(entry.Chunks)
 
 		chunks, _ := filer.CompactFileChunks(fh.f.wfs.LookupFn(), nonManifestChunks)
-		chunks, manifestErr := filer.MaybeManifestize(fh.f.wfs.saveDataAsChunk(fh.f.fullpath()), chunks)
+		chunks, manifestErr := filer.MaybeManifestize(fh.f.wfs.saveDataAsChunk(fh.f.fullpath(), fh.dirtyPages.GetWriteOnly()), chunks)
 		if manifestErr != nil {
 			// not good, but should be ok
 			glog.V(0).Infof("MaybeManifestize: %v", manifestErr)

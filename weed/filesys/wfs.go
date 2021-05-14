@@ -111,6 +111,9 @@ func NewSeaweedFileSystem(option *Option) *WFS {
 
 		dir, name := filePath.DirAndName()
 		parent := NodeWithId(util.FullPath(dir).AsInode())
+		if dir == option.FilerMountRootPath {
+			parent = NodeWithId(1)
+		}
 		if err := wfs.Server.InvalidateEntry(parent, name); err != nil {
 			glog.V(4).Infof("InvalidateEntry %s : %v", filePath, err)
 		}
@@ -121,7 +124,7 @@ func NewSeaweedFileSystem(option *Option) *WFS {
 		wfs.metaCache.Shutdown()
 	})
 
-	wfs.root = &Dir{name: wfs.option.FilerMountRootPath, wfs: wfs}
+	wfs.root = &Dir{name: wfs.option.FilerMountRootPath, wfs: wfs, id: 1}
 	wfs.fsNodeCache = newFsCache(wfs.root)
 
 	if wfs.option.ConcurrentWriters > 0 {
@@ -135,7 +138,7 @@ func (wfs *WFS) Root() (fs.Node, error) {
 	return wfs.root, nil
 }
 
-func (wfs *WFS) AcquireHandle(file *File, uid, gid uint32) (fileHandle *FileHandle) {
+func (wfs *WFS) AcquireHandle(file *File, uid, gid uint32, writeOnly bool) (fileHandle *FileHandle) {
 
 	fullpath := file.fullpath()
 	glog.V(4).Infof("AcquireHandle %s uid=%d gid=%d", fullpath, uid, gid)
@@ -147,13 +150,14 @@ func (wfs *WFS) AcquireHandle(file *File, uid, gid uint32) (fileHandle *FileHand
 	wfs.handlesLock.Unlock()
 	if found && existingHandle != nil {
 		existingHandle.f.isOpen++
+		existingHandle.dirtyPages.SetWriteOnly(writeOnly)
 		glog.V(4).Infof("Acquired Handle %s open %d", fullpath, existingHandle.f.isOpen)
 		return existingHandle
 	}
 
 	entry, _ := file.maybeLoadEntry(context.Background())
 	file.entry = entry
-	fileHandle = newFileHandle(file, uid, gid)
+	fileHandle = newFileHandle(file, uid, gid, writeOnly)
 	file.isOpen++
 
 	wfs.handlesLock.Lock()
@@ -263,6 +267,7 @@ func (wfs *WFS) LookupFn() wdclient.LookupFileIdFunctionType {
 }
 
 type NodeWithId uint64
+
 func (n NodeWithId) Id() uint64 {
 	return uint64(n)
 }
