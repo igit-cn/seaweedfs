@@ -3,6 +3,8 @@ syntax = "proto3";
 package volume_server_pb;
 option go_package = "github.com/chrislusf/seaweedfs/weed/pb/volume_server_pb";
 
+import "remote.proto";
+
 //////////////////////////////////////////////////
 
 service VolumeServer {
@@ -12,7 +14,7 @@ service VolumeServer {
 
     rpc VacuumVolumeCheck (VacuumVolumeCheckRequest) returns (VacuumVolumeCheckResponse) {
     }
-    rpc VacuumVolumeCompact (VacuumVolumeCompactRequest) returns (VacuumVolumeCompactResponse) {
+    rpc VacuumVolumeCompact (VacuumVolumeCompactRequest) returns (stream VacuumVolumeCompactResponse) {
     }
     rpc VacuumVolumeCommit (VacuumVolumeCommitRequest) returns (VacuumVolumeCommitResponse) {
     }
@@ -45,7 +47,7 @@ service VolumeServer {
     }
 
     // copy the .idx .dat files, and mount this volume
-    rpc VolumeCopy (VolumeCopyRequest) returns (VolumeCopyResponse) {
+    rpc VolumeCopy (VolumeCopyRequest) returns (stream VolumeCopyResponse) {
     }
     rpc ReadVolumeFileStatus (ReadVolumeFileStatusRequest) returns (ReadVolumeFileStatusResponse) {
     }
@@ -55,6 +57,8 @@ service VolumeServer {
     rpc ReadNeedleBlob (ReadNeedleBlobRequest) returns (ReadNeedleBlobResponse) {
     }
     rpc WriteNeedleBlob (WriteNeedleBlobRequest) returns (WriteNeedleBlobResponse) {
+    }
+    rpc ReadAllNeedles (ReadAllNeedlesRequest) returns (stream ReadAllNeedlesResponse) {
     }
 
     rpc VolumeTailSender (VolumeTailSenderRequest) returns (stream VolumeTailSenderResponse) {
@@ -93,12 +97,20 @@ service VolumeServer {
     rpc VolumeServerLeave (VolumeServerLeaveRequest) returns (VolumeServerLeaveResponse) {
     }
 
+    // remote storage
+    rpc FetchAndWriteNeedle (FetchAndWriteNeedleRequest) returns (FetchAndWriteNeedleResponse) {
+    }
+
     // <experimental> query
     rpc Query (QueryRequest) returns (stream QueriedStripe) {
     }
 
     rpc VolumeNeedleStatus (VolumeNeedleStatusRequest) returns (VolumeNeedleStatusResponse) {
     }
+
+    rpc Ping (PingRequest) returns (PingResponse) {
+    }
+
 }
 
 //////////////////////////////////////////////////
@@ -134,6 +146,7 @@ message VacuumVolumeCompactRequest {
     int64 preallocate = 2;
 }
 message VacuumVolumeCompactResponse {
+    int64 processed_bytes = 1;
 }
 
 message VacuumVolumeCommitRequest {
@@ -243,6 +256,7 @@ message VolumeCopyRequest {
 }
 message VolumeCopyResponse {
     uint64 last_append_at_ns = 1;
+    int64 processed_bytes = 2;
 }
 
 message CopyFileRequest {
@@ -256,6 +270,7 @@ message CopyFileRequest {
 }
 message CopyFileResponse {
     bytes file_content = 1;
+    int64 modified_ts_ns = 2;
 }
 
 message ReadNeedleBlobRequest {
@@ -275,6 +290,16 @@ message WriteNeedleBlobRequest {
     bytes needle_blob = 4;
 }
 message WriteNeedleBlobResponse {
+}
+
+message ReadAllNeedlesRequest {
+    repeated uint32 volume_ids = 1;
+}
+message ReadAllNeedlesResponse {
+    uint32 volume_id = 1;
+    uint64 needle_id = 2;
+    uint32 cookie = 3;
+    bytes needle_blob = 5;
 }
 
 message VolumeTailSenderRequest {
@@ -426,6 +451,7 @@ message VolumeInfo {
     string replication = 3;
 }
 
+// tiered storage
 message VolumeTierMoveDatToRemoteRequest {
     uint32 volume_id = 1;
     string collection = 2;
@@ -458,6 +484,27 @@ message VolumeServerStatusResponse {
 message VolumeServerLeaveRequest {
 }
 message VolumeServerLeaveResponse {
+}
+
+// remote storage
+message FetchAndWriteNeedleRequest {
+    uint32 volume_id = 1;
+    uint64 needle_id = 2;
+    uint32 cookie = 3;
+    int64 offset = 4;
+    int64 size = 5;
+    message Replica {
+        string url = 1;
+        string public_url = 2;
+        int32 grpc_port = 3;
+    }
+    repeated Replica replicas = 6;
+    string auth = 7;
+    // remote conf
+    remote_pb.RemoteConf remote_conf = 15;
+    remote_pb.RemoteStorageLocation remote_location = 16;
+}
+message FetchAndWriteNeedleResponse {
 }
 
 // select on volume servers
@@ -529,4 +576,14 @@ message VolumeNeedleStatusResponse {
     uint64 last_modified = 4;
     uint32 crc = 5;
     string ttl = 6;
+}
+
+message PingRequest {
+    string target = 1; // default to ping itself
+    string target_type = 2;
+}
+message PingResponse {
+    int64 start_time_ns = 1;
+    int64 remote_time_ns = 2;
+    int64 stop_time_ns = 3;
 }

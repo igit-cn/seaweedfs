@@ -1,14 +1,17 @@
 package needle
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"github.com/chrislusf/seaweedfs/weed/glog"
+	"github.com/chrislusf/seaweedfs/weed/stats"
 	"github.com/chrislusf/seaweedfs/weed/storage/backend"
 	. "github.com/chrislusf/seaweedfs/weed/storage/types"
 	"github.com/chrislusf/seaweedfs/weed/util"
 	"io"
 	"math"
+	"sync"
 )
 
 const (
@@ -29,10 +32,14 @@ func (n *Needle) DiskSize(version Version) int64 {
 	return GetActualSize(n.Size, version)
 }
 
-func (n *Needle) prepareWriteBuffer(version Version) ([]byte, Size, int64, error) {
+var bufPool = sync.Pool{
+	New: func() interface{} {
+		return new(bytes.Buffer)
+	},
+}
 
-	writeBytes := make([]byte, 0)
-
+func (n *Needle) prepareWriteBuffer(version Version, writeBytes *bytes.Buffer) (Size, int64, error) {
+	writeBytes.Reset()
 	switch version {
 	case Version1:
 		header := make([]byte, NeedleHeaderSize)
@@ -42,12 +49,12 @@ func (n *Needle) prepareWriteBuffer(version Version) ([]byte, Size, int64, error
 		SizeToBytes(header[CookieSize+NeedleIdSize:CookieSize+NeedleIdSize+SizeSize], n.Size)
 		size := n.Size
 		actualSize := NeedleHeaderSize + int64(n.Size)
-		writeBytes = append(writeBytes, header...)
-		writeBytes = append(writeBytes, n.Data...)
+		writeBytes.Write(header)
+		writeBytes.Write(n.Data)
 		padding := PaddingLength(n.Size, version)
 		util.Uint32toBytes(header[0:NeedleChecksumSize], n.Checksum.Value())
-		writeBytes = append(writeBytes, header[0:NeedleChecksumSize+padding]...)
-		return writeBytes, size, actualSize, nil
+		writeBytes.Write(header[0 : NeedleChecksumSize+padding])
+		return size, actualSize, nil
 	case Version2, Version3:
 		header := make([]byte, NeedleHeaderSize+TimestampSize) // adding timestamp to reuse it and avoid extra allocation
 		CookieToBytes(header[0:CookieSize], n.Cookie)
@@ -79,51 +86,51 @@ func (n *Needle) prepareWriteBuffer(version Version) ([]byte, Size, int64, error
 			n.Size = 0
 		}
 		SizeToBytes(header[CookieSize+NeedleIdSize:CookieSize+NeedleIdSize+SizeSize], n.Size)
-		writeBytes = append(writeBytes, header[0:NeedleHeaderSize]...)
+		writeBytes.Write(header[0:NeedleHeaderSize])
 		if n.DataSize > 0 {
 			util.Uint32toBytes(header[0:4], n.DataSize)
-			writeBytes = append(writeBytes, header[0:4]...)
-			writeBytes = append(writeBytes, n.Data...)
+			writeBytes.Write(header[0:4])
+			writeBytes.Write(n.Data)
 			util.Uint8toBytes(header[0:1], n.Flags)
-			writeBytes = append(writeBytes, header[0:1]...)
+			writeBytes.Write(header[0:1])
 			if n.HasName() {
 				util.Uint8toBytes(header[0:1], n.NameSize)
-				writeBytes = append(writeBytes, header[0:1]...)
-				writeBytes = append(writeBytes, n.Name[:n.NameSize]...)
+				writeBytes.Write(header[0:1])
+				writeBytes.Write(n.Name[:n.NameSize])
 			}
 			if n.HasMime() {
 				util.Uint8toBytes(header[0:1], n.MimeSize)
-				writeBytes = append(writeBytes, header[0:1]...)
-				writeBytes = append(writeBytes, n.Mime...)
+				writeBytes.Write(header[0:1])
+				writeBytes.Write(n.Mime)
 			}
 			if n.HasLastModifiedDate() {
 				util.Uint64toBytes(header[0:8], n.LastModified)
-				writeBytes = append(writeBytes, header[8-LastModifiedBytesLength:8]...)
+				writeBytes.Write(header[8-LastModifiedBytesLength : 8])
 			}
 			if n.HasTtl() && n.Ttl != nil {
 				n.Ttl.ToBytes(header[0:TtlBytesLength])
-				writeBytes = append(writeBytes, header[0:TtlBytesLength]...)
+				writeBytes.Write(header[0:TtlBytesLength])
 			}
 			if n.HasPairs() {
 				util.Uint16toBytes(header[0:2], n.PairsSize)
-				writeBytes = append(writeBytes, header[0:2]...)
-				writeBytes = append(writeBytes, n.Pairs...)
+				writeBytes.Write(header[0:2])
+				writeBytes.Write(n.Pairs)
 			}
 		}
 		padding := PaddingLength(n.Size, version)
 		util.Uint32toBytes(header[0:NeedleChecksumSize], n.Checksum.Value())
 		if version == Version2 {
-			writeBytes = append(writeBytes, header[0:NeedleChecksumSize+padding]...)
+			writeBytes.Write(header[0 : NeedleChecksumSize+padding])
 		} else {
 			// version3
 			util.Uint64toBytes(header[NeedleChecksumSize:NeedleChecksumSize+TimestampSize], n.AppendAtNs)
-			writeBytes = append(writeBytes, header[0:NeedleChecksumSize+TimestampSize+padding]...)
+			writeBytes.Write(header[0 : NeedleChecksumSize+TimestampSize+padding])
 		}
 
-		return writeBytes, Size(n.DataSize), GetActualSize(n.Size, version), nil
+		return Size(n.DataSize), GetActualSize(n.Size, version), nil
 	}
 
-	return writeBytes, 0, 0, fmt.Errorf("Unsupported Version! (%d)", version)
+	return 0, 0, fmt.Errorf("Unsupported Version! (%d)", version)
 }
 
 func (n *Needle) Append(w backend.BackendStorageFile, version Version) (offset uint64, size Size, actualSize int64, err error) {
@@ -141,15 +148,18 @@ func (n *Needle) Append(w backend.BackendStorageFile, version Version) (offset u
 		err = fmt.Errorf("Cannot Read Current Volume Position: %v", e)
 		return
 	}
-	if offset >= MaxPossibleVolumeSize {
+	if offset >= MaxPossibleVolumeSize && n.Size.IsValid() {
 		err = fmt.Errorf("Volume Size %d Exeededs %d", offset, MaxPossibleVolumeSize)
 		return
 	}
 
-	bytesToWrite, size, actualSize, err := n.prepareWriteBuffer(version)
+	bytesBuffer := bufPool.Get().(*bytes.Buffer)
+	defer bufPool.Put(bytesBuffer)
+
+	size, actualSize, err = n.prepareWriteBuffer(version, bytesBuffer)
 
 	if err == nil {
-		_, err = w.WriteAt(bytesToWrite, int64(offset))
+		_, err = w.WriteAt(bytesBuffer.Bytes(), int64(offset))
 	}
 
 	return offset, size, actualSize, err
@@ -196,7 +206,7 @@ func ReadNeedleBlob(r backend.BackendStorageFile, offset int64, size Size, versi
 	}
 	if err != nil {
 		fileSize, _, _ := r.GetStat()
-		println("n", n, "dataSize", dataSize, "offset", offset, "fileSize", fileSize)
+		glog.Errorf("%s read %d dataSize %d offset %d fileSize %d: %v", r.Name(), n, dataSize, offset, fileSize, err)
 	}
 	return dataSlice, err
 
@@ -208,9 +218,11 @@ func (n *Needle) ReadBytes(bytes []byte, offset int64, size Size, version Versio
 	if n.Size != size {
 		// cookie is not always passed in for this API. Use size to do preliminary checking.
 		if OffsetSize == 4 && offset < int64(MaxPossibleVolumeSize) {
+			stats.VolumeServerRequestCounter.WithLabelValues(stats.ErrorSizeMismatchOffsetSize).Inc()
 			glog.Errorf("entry not found1: offset %d found id %x size %d, expected size %d", offset, n.Id, n.Size, size)
 			return ErrorSizeMismatch
 		}
+		stats.VolumeServerRequestCounter.WithLabelValues(stats.ErrorSizeMismatch).Inc()
 		return fmt.Errorf("entry not found: offset %d found id %x size %d, expected size %d", offset, n.Id, n.Size, size)
 	}
 	switch version {
@@ -226,6 +238,7 @@ func (n *Needle) ReadBytes(bytes []byte, offset int64, size Size, version Versio
 		checksum := util.BytesToUint32(bytes[NeedleHeaderSize+size : NeedleHeaderSize+size+NeedleChecksumSize])
 		newChecksum := NewCRC(n.Data)
 		if checksum != newChecksum.Value() {
+			stats.VolumeServerRequestCounter.WithLabelValues(stats.ErrorCRC).Inc()
 			return errors.New("CRC error! Data On Disk Corrupted")
 		}
 		n.Checksum = newChecksum
@@ -258,6 +271,7 @@ func (n *Needle) readNeedleDataVersion2(bytes []byte) (err error) {
 		n.DataSize = util.BytesToUint32(bytes[index : index+4])
 		index = index + 4
 		if int(n.DataSize)+index > lenBytes {
+			stats.VolumeServerRequestCounter.WithLabelValues(stats.ErrorIndexOutOfRange).Inc()
 			return fmt.Errorf("index out of range %d", 1)
 		}
 		n.Data = bytes[index : index+int(n.DataSize)]
@@ -269,6 +283,7 @@ func (n *Needle) readNeedleDataVersion2(bytes []byte) (err error) {
 		n.NameSize = uint8(bytes[index])
 		index = index + 1
 		if int(n.NameSize)+index > lenBytes {
+			stats.VolumeServerRequestCounter.WithLabelValues(stats.ErrorIndexOutOfRange).Inc()
 			return fmt.Errorf("index out of range %d", 2)
 		}
 		n.Name = bytes[index : index+int(n.NameSize)]
@@ -278,6 +293,7 @@ func (n *Needle) readNeedleDataVersion2(bytes []byte) (err error) {
 		n.MimeSize = uint8(bytes[index])
 		index = index + 1
 		if int(n.MimeSize)+index > lenBytes {
+			stats.VolumeServerRequestCounter.WithLabelValues(stats.ErrorIndexOutOfRange).Inc()
 			return fmt.Errorf("index out of range %d", 3)
 		}
 		n.Mime = bytes[index : index+int(n.MimeSize)]
@@ -285,6 +301,7 @@ func (n *Needle) readNeedleDataVersion2(bytes []byte) (err error) {
 	}
 	if index < lenBytes && n.HasLastModifiedDate() {
 		if LastModifiedBytesLength+index > lenBytes {
+			stats.VolumeServerRequestCounter.WithLabelValues(stats.ErrorIndexOutOfRange).Inc()
 			return fmt.Errorf("index out of range %d", 4)
 		}
 		n.LastModified = util.BytesToUint64(bytes[index : index+LastModifiedBytesLength])
@@ -292,6 +309,7 @@ func (n *Needle) readNeedleDataVersion2(bytes []byte) (err error) {
 	}
 	if index < lenBytes && n.HasTtl() {
 		if TtlBytesLength+index > lenBytes {
+			stats.VolumeServerRequestCounter.WithLabelValues(stats.ErrorIndexOutOfRange).Inc()
 			return fmt.Errorf("index out of range %d", 5)
 		}
 		n.Ttl = LoadTTLFromBytes(bytes[index : index+TtlBytesLength])
@@ -299,11 +317,13 @@ func (n *Needle) readNeedleDataVersion2(bytes []byte) (err error) {
 	}
 	if index < lenBytes && n.HasPairs() {
 		if 2+index > lenBytes {
+			stats.VolumeServerRequestCounter.WithLabelValues(stats.ErrorIndexOutOfRange).Inc()
 			return fmt.Errorf("index out of range %d", 6)
 		}
 		n.PairsSize = util.BytesToUint16(bytes[index : index+2])
 		index += 2
 		if int(n.PairsSize)+index > lenBytes {
+			stats.VolumeServerRequestCounter.WithLabelValues(stats.ErrorIndexOutOfRange).Inc()
 			return fmt.Errorf("index out of range %d", 7)
 		}
 		end := index + int(n.PairsSize)

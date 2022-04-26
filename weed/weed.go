@@ -4,6 +4,7 @@ import (
 	"embed"
 	"fmt"
 	weed_server "github.com/chrislusf/seaweedfs/weed/server"
+	"github.com/chrislusf/seaweedfs/weed/util"
 	flag "github.com/chrislusf/seaweedfs/weed/util/fla9"
 	"io"
 	"io/fs"
@@ -40,12 +41,19 @@ var static embed.FS
 
 func init() {
 	weed_server.StaticFS, _ = fs.Sub(static, "static")
+
+	flag.Var(&util.ConfigurationFileDirectory, "config_dir", "directory with toml configuration files")
 }
 
 func main() {
 	glog.MaxSize = 1024 * 1024 * 32
 	rand.Seed(time.Now().UnixNano())
 	flag.Usage = usage
+
+	if command.AutocompleteMain(commands) {
+		return
+	}
+
 	flag.Parse()
 
 	args := flag.Args()

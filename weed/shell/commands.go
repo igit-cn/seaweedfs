@@ -20,15 +20,16 @@ type ShellOptions struct {
 	Masters        *string
 	GrpcDialOption grpc.DialOption
 	// shell transient context
-	FilerHost string
-	FilerPort int64
-	Directory string
+	FilerHost    string
+	FilerPort    int64
+	FilerAddress pb.ServerAddress
+	Directory    string
 }
 
 type CommandEnv struct {
 	env          map[string]string
 	MasterClient *wdclient.MasterClient
-	option       ShellOptions
+	option       *ShellOptions
 	locker       *exclusive_locks.ExclusiveLocker
 }
 
@@ -42,13 +43,13 @@ var (
 	Commands = []command{}
 )
 
-func NewCommandEnv(options ShellOptions) *CommandEnv {
+func NewCommandEnv(options *ShellOptions) *CommandEnv {
 	ce := &CommandEnv{
 		env:          make(map[string]string),
-		MasterClient: wdclient.NewMasterClient(options.GrpcDialOption, pb.AdminShellClient, "", 0, "", strings.Split(*options.Masters, ",")),
+		MasterClient: wdclient.NewMasterClient(options.GrpcDialOption, pb.AdminShellClient, "", "", pb.ServerAddresses(*options.Masters).ToAddressMap()),
 		option:       options,
 	}
-	ce.locker = exclusive_locks.NewExclusiveLocker(ce.MasterClient)
+	ce.locker = exclusive_locks.NewExclusiveLocker(ce.MasterClient, "admin")
 	return ce
 }
 
@@ -69,13 +70,14 @@ func (ce *CommandEnv) isDirectory(path string) bool {
 
 }
 
-func (ce *CommandEnv) confirmIsLocked() error {
+func (ce *CommandEnv) confirmIsLocked(args []string) error {
 
 	if ce.locker.IsLocking() {
 		return nil
 	}
+	ce.locker.SetMessage(fmt.Sprintf("%v", args))
 
-	return fmt.Errorf("need to lock to continue")
+	return fmt.Errorf("need to run \"lock\" first to continue")
 
 }
 
@@ -95,10 +97,9 @@ func (ce *CommandEnv) checkDirectory(path string) error {
 
 var _ = filer_pb.FilerClient(&CommandEnv{})
 
-func (ce *CommandEnv) WithFilerClient(fn func(filer_pb.SeaweedFilerClient) error) error {
+func (ce *CommandEnv) WithFilerClient(streamingMode bool, fn func(filer_pb.SeaweedFilerClient) error) error {
 
-	filerGrpcAddress := fmt.Sprintf("%s:%d", ce.option.FilerHost, ce.option.FilerPort+10000)
-	return pb.WithGrpcFilerClient(filerGrpcAddress, ce.option.GrpcDialOption, fn)
+	return pb.WithGrpcFilerClient(streamingMode, ce.option.FilerAddress, ce.option.GrpcDialOption, fn)
 
 }
 

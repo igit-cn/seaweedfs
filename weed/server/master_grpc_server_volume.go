@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/chrislusf/raft"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,8 +42,11 @@ func (ms *MasterServer) ProcessGrowRequest() {
 				return !found
 			})
 
+			option := req.Option
+			vl := ms.Topo.GetVolumeLayout(option.Collection, option.ReplicaPlacement, option.Ttl, option.DiskType)
+
 			// not atomic but it's okay
-			if !found && ms.shouldVolumeGrow(req.Option) {
+			if !found && vl.ShouldGrowVolumes(option) {
 				filter.Store(req, nil)
 				// we have lock called inside vg
 				go func() {
@@ -50,6 +54,7 @@ func (ms *MasterServer) ProcessGrowRequest() {
 					start := time.Now()
 					_, err := ms.vg.AutomaticGrowByType(req.Option, ms.grpcDialOption, ms.Topo, req.Count)
 					glog.V(1).Infoln("finished automatic volume grow, cost ", time.Now().Sub(start))
+					vl.DoneGrowRequest()
 
 					if req.ErrCh != nil {
 						req.ErrCh <- err
@@ -68,12 +73,8 @@ func (ms *MasterServer) ProcessGrowRequest() {
 
 func (ms *MasterServer) LookupVolume(ctx context.Context, req *master_pb.LookupVolumeRequest) (*master_pb.LookupVolumeResponse, error) {
 
-	if !ms.Topo.IsLeader() {
-		return nil, raft.NotLeaderError
-	}
-
 	resp := &master_pb.LookupVolumeResponse{}
-	volumeLocations := ms.lookupVolumeId(req.VolumeIds, req.Collection)
+	volumeLocations := ms.lookupVolumeId(req.VolumeOrFileIds, req.Collection)
 
 	for _, result := range volumeLocations {
 		var locations []*master_pb.Location
@@ -83,10 +84,15 @@ func (ms *MasterServer) LookupVolume(ctx context.Context, req *master_pb.LookupV
 				PublicUrl: loc.PublicUrl,
 			})
 		}
+		var auth string
+		if strings.Contains(result.VolumeOrFileId, ",") { // this is a file id
+			auth = string(security.GenJwtForVolumeServer(ms.guard.SigningKey, ms.guard.ExpiresAfterSec, result.VolumeOrFileId))
+		}
 		resp.VolumeIdLocations = append(resp.VolumeIdLocations, &master_pb.LookupVolumeResponse_VolumeIdLocation{
-			VolumeId:  result.VolumeId,
-			Locations: locations,
-			Error:     result.Error,
+			VolumeOrFileId: result.VolumeOrFileId,
+			Locations:      locations,
+			Error:          result.Error,
+			Auth:           auth,
 		})
 	}
 
@@ -128,10 +134,13 @@ func (ms *MasterServer) Assign(ctx context.Context, req *master_pb.AssignRequest
 		MemoryMapMaxSizeMb: req.MemoryMapMaxSizeMb,
 	}
 
-	if ms.shouldVolumeGrow(option) {
+	vl := ms.Topo.GetVolumeLayout(option.Collection, option.ReplicaPlacement, option.Ttl, option.DiskType)
+
+	if !vl.HasGrowRequest() && vl.ShouldGrowVolumes(option) {
 		if ms.Topo.AvailableSpaceFor(option) <= 0 {
 			return nil, fmt.Errorf("no free volumes left for " + option.String())
 		}
+		vl.AddGrowRequest()
 		ms.vgCh <- &topology.VolumeGrowRequest{
 			Option: option,
 			Count:  int(req.WritableVolumeCount),
@@ -143,16 +152,29 @@ func (ms *MasterServer) Assign(ctx context.Context, req *master_pb.AssignRequest
 		maxTimeout = time.Second * 10
 		startTime  = time.Now()
 	)
-	
+
 	for time.Now().Sub(startTime) < maxTimeout {
-		fid, count, dn, err := ms.Topo.PickForWrite(req.Count, option)
+		fid, count, dnList, err := ms.Topo.PickForWrite(req.Count, option)
 		if err == nil {
+			dn := dnList.Head()
+			var replicas []*master_pb.Location
+			for _, r := range dnList.Rest() {
+				replicas = append(replicas, &master_pb.Location{
+					Url:       r.Url(),
+					PublicUrl: r.PublicUrl,
+					GrpcPort:  uint32(r.GrpcPort),
+				})
+			}
 			return &master_pb.AssignResponse{
-				Fid:       fid,
-				Url:       dn.Url(),
-				PublicUrl: dn.PublicUrl,
-				Count:     count,
-				Auth:      string(security.GenJwt(ms.guard.SigningKey, ms.guard.ExpiresAfterSec, fid)),
+				Fid: fid,
+				Location: &master_pb.Location{
+					Url:       dn.Url(),
+					PublicUrl: dn.PublicUrl,
+					GrpcPort:  uint32(dn.GrpcPort),
+				},
+				Count:    count,
+				Auth:     string(security.GenJwtForVolumeServer(ms.guard.SigningKey, ms.guard.ExpiresAfterSec, fid)),
+				Replicas: replicas,
 			}, nil
 		}
 		//glog.V(4).Infoln("waiting for volume growing...")
@@ -246,7 +268,7 @@ func (ms *MasterServer) VacuumVolume(ctx context.Context, req *master_pb.VacuumV
 
 	resp := &master_pb.VacuumVolumeResponse{}
 
-	ms.Topo.Vacuum(ms.grpcDialOption, float64(req.GarbageThreshold), ms.preallocateSize)
+	ms.Topo.Vacuum(ms.grpcDialOption, float64(req.GarbageThreshold), req.VolumeId, req.Collection, ms.preallocateSize)
 
 	return resp, nil
 }

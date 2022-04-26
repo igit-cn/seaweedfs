@@ -5,16 +5,17 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"github.com/chrislusf/seaweedfs/weed/s3api/policy"
-	"github.com/chrislusf/seaweedfs/weed/s3api/s3err"
-	"github.com/dustin/go-humanize"
-	"github.com/gorilla/mux"
 	"io"
-	"io/ioutil"
 	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/chrislusf/seaweedfs/weed/glog"
+	"github.com/chrislusf/seaweedfs/weed/s3api/policy"
+	"github.com/chrislusf/seaweedfs/weed/s3api/s3err"
+	"github.com/dustin/go-humanize"
+	"github.com/gorilla/mux"
 )
 
 func (s3a *S3ApiServer) PostPolicyBucketHandler(w http.ResponseWriter, r *http.Request) {
@@ -24,25 +25,27 @@ func (s3a *S3ApiServer) PostPolicyBucketHandler(w http.ResponseWriter, r *http.R
 
 	bucket := mux.Vars(r)["bucket"]
 
+	glog.V(3).Infof("PostPolicyBucketHandler %s", bucket)
+
 	reader, err := r.MultipartReader()
 	if err != nil {
-		writeErrorResponse(w, s3err.ErrMalformedPOSTRequest, r.URL)
+		s3err.WriteErrorResponse(w, r, s3err.ErrMalformedPOSTRequest)
 		return
 	}
 	form, err := reader.ReadForm(int64(5 * humanize.MiByte))
 	if err != nil {
-		writeErrorResponse(w, s3err.ErrMalformedPOSTRequest, r.URL)
+		s3err.WriteErrorResponse(w, r, s3err.ErrMalformedPOSTRequest)
 		return
 	}
 	defer form.RemoveAll()
 
 	fileBody, fileName, fileSize, formValues, err := extractPostPolicyFormValues(form)
 	if err != nil {
-		writeErrorResponse(w, s3err.ErrMalformedPOSTRequest, r.URL)
+		s3err.WriteErrorResponse(w, r, s3err.ErrMalformedPOSTRequest)
 		return
 	}
 	if fileBody == nil {
-		writeErrorResponse(w, s3err.ErrPOSTFileRequired, r.URL)
+		s3err.WriteErrorResponse(w, r, s3err.ErrPOSTFileRequired)
 		return
 	}
 	defer fileBody.Close()
@@ -60,7 +63,7 @@ func (s3a *S3ApiServer) PostPolicyBucketHandler(w http.ResponseWriter, r *http.R
 	if successRedirect != "" {
 		redirectURL, err = url.Parse(successRedirect)
 		if err != nil {
-			writeErrorResponse(w, s3err.ErrMalformedPOSTRequest, r.URL)
+			s3err.WriteErrorResponse(w, r, s3err.ErrMalformedPOSTRequest)
 			return
 		}
 	}
@@ -68,13 +71,13 @@ func (s3a *S3ApiServer) PostPolicyBucketHandler(w http.ResponseWriter, r *http.R
 	// Verify policy signature.
 	errCode := s3a.iam.doesPolicySignatureMatch(formValues)
 	if errCode != s3err.ErrNone {
-		writeErrorResponse(w, errCode, r.URL)
+		s3err.WriteErrorResponse(w, r, errCode)
 		return
 	}
 
 	policyBytes, err := base64.StdEncoding.DecodeString(formValues.Get("Policy"))
 	if err != nil {
-		writeErrorResponse(w, s3err.ErrMalformedPOSTRequest, r.URL)
+		s3err.WriteErrorResponse(w, r, s3err.ErrMalformedPOSTRequest)
 		return
 	}
 
@@ -83,7 +86,7 @@ func (s3a *S3ApiServer) PostPolicyBucketHandler(w http.ResponseWriter, r *http.R
 
 		postPolicyForm, err := policy.ParsePostPolicyForm(string(policyBytes))
 		if err != nil {
-			writeErrorResponse(w, s3err.ErrPostPolicyConditionInvalidFormat, r.URL)
+			s3err.WriteErrorResponse(w, r, s3err.ErrPostPolicyConditionInvalidFormat)
 			return
 		}
 
@@ -99,23 +102,23 @@ func (s3a *S3ApiServer) PostPolicyBucketHandler(w http.ResponseWriter, r *http.R
 		lengthRange := postPolicyForm.Conditions.ContentLengthRange
 		if lengthRange.Valid {
 			if fileSize < lengthRange.Min {
-				writeErrorResponse(w, s3err.ErrEntityTooSmall, r.URL)
+				s3err.WriteErrorResponse(w, r, s3err.ErrEntityTooSmall)
 				return
 			}
 
 			if fileSize > lengthRange.Max {
-				writeErrorResponse(w, s3err.ErrEntityTooLarge, r.URL)
+				s3err.WriteErrorResponse(w, r, s3err.ErrEntityTooLarge)
 				return
 			}
 		}
 	}
 
-	uploadUrl := fmt.Sprintf("http://%s%s/%s%s", s3a.option.Filer, s3a.option.BucketsPath, bucket, urlPathEscape(object))
+	uploadUrl := fmt.Sprintf("http://%s%s/%s%s", s3a.option.Filer.ToHttpAddress(), s3a.option.BucketsPath, bucket, urlPathEscape(object))
 
 	etag, errCode := s3a.putToFiler(r, uploadUrl, fileBody)
 
 	if errCode != s3err.ErrNone {
-		writeErrorResponse(w, errCode, r.URL)
+		s3err.WriteErrorResponse(w, r, errCode)
 		return
 	}
 
@@ -123,7 +126,7 @@ func (s3a *S3ApiServer) PostPolicyBucketHandler(w http.ResponseWriter, r *http.R
 		// Replace raw query params..
 		redirectURL.RawQuery = getRedirectPostRawQuery(bucket, object, etag)
 		w.Header().Set("Location", redirectURL.String())
-		writeResponse(w, http.StatusSeeOther, nil, mimeNone)
+		s3err.WriteEmptyResponse(w, r, http.StatusSeeOther)
 		return
 	}
 
@@ -132,24 +135,25 @@ func (s3a *S3ApiServer) PostPolicyBucketHandler(w http.ResponseWriter, r *http.R
 	// Decide what http response to send depending on success_action_status parameter
 	switch successStatus {
 	case "201":
-		resp := encodeResponse(PostResponse{
+		resp := PostResponse{
 			Bucket:   bucket,
 			Key:      object,
 			ETag:     `"` + etag + `"`,
 			Location: w.Header().Get("Location"),
-		})
-		writeResponse(w, http.StatusCreated, resp, mimeXML)
+		}
+		s3err.WriteXMLResponse(w, r, http.StatusCreated, resp)
+		s3err.PostLog(r, http.StatusCreated, s3err.ErrNone)
 	case "200":
-		writeResponse(w, http.StatusOK, nil, mimeNone)
+		s3err.WriteEmptyResponse(w, r, http.StatusOK)
 	default:
-		writeSuccessResponseEmpty(w)
+		writeSuccessResponseEmpty(w, r)
 	}
 
 }
 
 // Extract form fields and file data from a HTTP POST Policy
 func extractPostPolicyFormValues(form *multipart.Form) (filePart io.ReadCloser, fileName string, fileSize int64, formValues http.Header, err error) {
-	/// HTML Form values
+	// / HTML Form values
 	fileName = ""
 
 	// Canonicalize the form values into http.Header.
@@ -172,7 +176,7 @@ func extractPostPolicyFormValues(form *multipart.Form) (filePart io.ReadCloser, 
 			b.WriteString(v)
 		}
 		fileSize = int64(b.Len())
-		filePart = ioutil.NopCloser(b)
+		filePart = io.NopCloser(b)
 		return filePart, fileName, fileSize, formValues, nil
 	}
 

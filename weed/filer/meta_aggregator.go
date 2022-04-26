@@ -3,6 +3,8 @@ package filer
 import (
 	"context"
 	"fmt"
+	"github.com/chrislusf/seaweedfs/weed/cluster"
+	"github.com/chrislusf/seaweedfs/weed/pb/master_pb"
 	"github.com/chrislusf/seaweedfs/weed/util"
 	"io"
 	"sync"
@@ -18,9 +20,13 @@ import (
 )
 
 type MetaAggregator struct {
-	filers         []string
-	grpcDialOption grpc.DialOption
-	MetaLogBuffer  *log_buffer.LogBuffer
+	filer           *Filer
+	self            pb.ServerAddress
+	isLeader        bool
+	grpcDialOption  grpc.DialOption
+	MetaLogBuffer   *log_buffer.LogBuffer
+	peerStatues     map[pb.ServerAddress]int
+	peerStatuesLock sync.Mutex
 	// notifying clients
 	ListenersLock sync.Mutex
 	ListenersCond *sync.Cond
@@ -28,25 +34,62 @@ type MetaAggregator struct {
 
 // MetaAggregator only aggregates data "on the fly". The logs are not re-persisted to disk.
 // The old data comes from what each LocalMetadata persisted on disk.
-func NewMetaAggregator(filers []string, grpcDialOption grpc.DialOption) *MetaAggregator {
+func NewMetaAggregator(filer *Filer, self pb.ServerAddress, grpcDialOption grpc.DialOption) *MetaAggregator {
 	t := &MetaAggregator{
-		filers:         filers,
+		filer:          filer,
+		self:           self,
 		grpcDialOption: grpcDialOption,
+		peerStatues:    make(map[pb.ServerAddress]int),
 	}
 	t.ListenersCond = sync.NewCond(&t.ListenersLock)
-	t.MetaLogBuffer = log_buffer.NewLogBuffer(LogFlushInterval, nil, func() {
+	t.MetaLogBuffer = log_buffer.NewLogBuffer("aggr", LogFlushInterval, nil, func() {
 		t.ListenersCond.Broadcast()
 	})
 	return t
 }
 
-func (ma *MetaAggregator) StartLoopSubscribe(f *Filer, self string) {
-	for _, filer := range ma.filers {
-		go ma.subscribeToOneFiler(f, self, filer)
+func (ma *MetaAggregator) OnPeerUpdate(update *master_pb.ClusterNodeUpdate) {
+	if update.NodeType != cluster.FilerType {
+		return
+	}
+
+	address := pb.ServerAddress(update.Address)
+	if update.IsAdd {
+		// every filer should subscribe to a new filer
+		if ma.setActive(address, true) {
+			go ma.subscribeToOneFiler(ma.filer, ma.self, address)
+		}
+	} else {
+		ma.setActive(address, false)
 	}
 }
 
-func (ma *MetaAggregator) subscribeToOneFiler(f *Filer, self string, peer string) {
+func (ma *MetaAggregator) setActive(address pb.ServerAddress, isActive bool) (notDuplicated bool) {
+	ma.peerStatuesLock.Lock()
+	defer ma.peerStatuesLock.Unlock()
+	if isActive {
+		if _, found := ma.peerStatues[address]; found {
+			ma.peerStatues[address] += 1
+		} else {
+			ma.peerStatues[address] = 1
+			notDuplicated = true
+		}
+	} else {
+		if _, found := ma.peerStatues[address]; found {
+			delete(ma.peerStatues, address)
+		}
+	}
+	return
+}
+func (ma *MetaAggregator) isActive(address pb.ServerAddress) (isActive bool) {
+	ma.peerStatuesLock.Lock()
+	defer ma.peerStatuesLock.Unlock()
+	var count int
+	count, isActive = ma.peerStatues[address]
+	return count > 0 && isActive
+}
+
+func (ma *MetaAggregator) subscribeToOneFiler(f *Filer, self pb.ServerAddress, peer pb.ServerAddress) {
 
 	/*
 		Each filer reads the "filer.store.id", which is the store's signature when filer starts.
@@ -110,7 +153,7 @@ func (ma *MetaAggregator) subscribeToOneFiler(f *Filer, self string, peer string
 		}
 		dir := event.Directory
 		// println("received meta change", dir, "size", len(data))
-		ma.MetaLogBuffer.AddToBuffer([]byte(dir), data, 0)
+		ma.MetaLogBuffer.AddToBuffer([]byte(dir), data, event.TsNs)
 		if maybeReplicateMetadataChange != nil {
 			maybeReplicateMetadataChange(event)
 		}
@@ -118,13 +161,15 @@ func (ma *MetaAggregator) subscribeToOneFiler(f *Filer, self string, peer string
 	}
 
 	for {
-		err := pb.WithFilerClient(peer, ma.grpcDialOption, func(client filer_pb.SeaweedFilerClient) error {
+		glog.V(4).Infof("subscribing remote %s meta change: %v", peer, time.Unix(0, lastTsNs))
+		err := pb.WithFilerClient(true, peer, ma.grpcDialOption, func(client filer_pb.SeaweedFilerClient) error {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			stream, err := client.SubscribeLocalMetadata(ctx, &filer_pb.SubscribeMetadataRequest{
-				ClientName: "filer:" + self,
+				ClientName: "filer:" + string(self),
 				PathPrefix: "/",
 				SinceNs:    lastTsNs,
+				ClientId:   int32(ma.filer.UniqueFileId),
 			})
 			if err != nil {
 				return fmt.Errorf("subscribe: %v", err)
@@ -148,6 +193,10 @@ func (ma *MetaAggregator) subscribeToOneFiler(f *Filer, self string, peer string
 
 			}
 		})
+		if !ma.isActive(peer) {
+			glog.V(0).Infof("stop subscribing remote %s meta change", peer)
+			return
+		}
 		if err != nil {
 			glog.V(0).Infof("subscribing remote %s meta change: %v", peer, err)
 			time.Sleep(1733 * time.Millisecond)
@@ -155,8 +204,8 @@ func (ma *MetaAggregator) subscribeToOneFiler(f *Filer, self string, peer string
 	}
 }
 
-func (ma *MetaAggregator) readFilerStoreSignature(peer string) (sig int32, err error) {
-	err = pb.WithFilerClient(peer, ma.grpcDialOption, func(client filer_pb.SeaweedFilerClient) error {
+func (ma *MetaAggregator) readFilerStoreSignature(peer pb.ServerAddress) (sig int32, err error) {
+	err = pb.WithFilerClient(false, peer, ma.grpcDialOption, func(client filer_pb.SeaweedFilerClient) error {
 		resp, err := client.GetFilerConfiguration(context.Background(), &filer_pb.GetFilerConfigurationRequest{})
 		if err != nil {
 			return err
@@ -171,7 +220,7 @@ const (
 	MetaOffsetPrefix = "Meta"
 )
 
-func (ma *MetaAggregator) readOffset(f *Filer, peer string, peerSignature int32) (lastTsNs int64, err error) {
+func (ma *MetaAggregator) readOffset(f *Filer, peer pb.ServerAddress, peerSignature int32) (lastTsNs int64, err error) {
 
 	key := []byte(MetaOffsetPrefix + "xxxx")
 	util.Uint32toBytes(key[len(MetaOffsetPrefix):], uint32(peerSignature))
@@ -194,7 +243,7 @@ func (ma *MetaAggregator) readOffset(f *Filer, peer string, peerSignature int32)
 	return
 }
 
-func (ma *MetaAggregator) updateOffset(f *Filer, peer string, peerSignature int32, lastTsNs int64) (err error) {
+func (ma *MetaAggregator) updateOffset(f *Filer, peer pb.ServerAddress, peerSignature int32, lastTsNs int64) (err error) {
 
 	key := []byte(MetaOffsetPrefix + "xxxx")
 	util.Uint32toBytes(key[len(MetaOffsetPrefix):], uint32(peerSignature))

@@ -56,9 +56,8 @@ func (fs *FilerSource) LookupFileId(part string) (fileUrls []string, err error) 
 
 	vid := volumeId(part)
 
-	err = fs.WithFilerClient(func(client filer_pb.SeaweedFilerClient) error {
+	err = fs.WithFilerClient(false, func(client filer_pb.SeaweedFilerClient) error {
 
-		glog.V(4).Infof("read lookup volume id locations: %v", vid)
 		resp, err := client.LookupVolume(context.Background(), &filer_pb.LookupVolumeRequest{
 			VolumeIds: []string{vid},
 		})
@@ -97,7 +96,7 @@ func (fs *FilerSource) LookupFileId(part string) (fileUrls []string, err error) 
 func (fs *FilerSource) ReadPart(fileId string) (filename string, header http.Header, resp *http.Response, err error) {
 
 	if fs.proxyByFiler {
-		return util.DownloadFile("http://" + fs.address + "/?proxyChunkId=" + fileId)
+		return util.DownloadFile("http://"+fs.address+"/?proxyChunkId="+fileId, "")
 	}
 
 	fileUrls, err := fs.LookupFileId(fileId)
@@ -106,7 +105,7 @@ func (fs *FilerSource) ReadPart(fileId string) (filename string, header http.Hea
 	}
 
 	for _, fileUrl := range fileUrls {
-		filename, header, resp, err = util.DownloadFile(fileUrl)
+		filename, header, resp, err = util.DownloadFile(fileUrl, "")
 		if err != nil {
 			glog.V(1).Infof("fail to read from %s: %v", fileUrl, err)
 		} else {
@@ -119,9 +118,9 @@ func (fs *FilerSource) ReadPart(fileId string) (filename string, header http.Hea
 
 var _ = filer_pb.FilerClient(&FilerSource{})
 
-func (fs *FilerSource) WithFilerClient(fn func(filer_pb.SeaweedFilerClient) error) error {
+func (fs *FilerSource) WithFilerClient(streamingMode bool, fn func(filer_pb.SeaweedFilerClient) error) error {
 
-	return pb.WithCachedGrpcClient(func(grpcConnection *grpc.ClientConn) error {
+	return pb.WithGrpcClient(streamingMode, func(grpcConnection *grpc.ClientConn) error {
 		client := filer_pb.NewSeaweedFilerClient(grpcConnection)
 		return fn(client)
 	}, fs.grpcAddress, fs.grpcDialOption)

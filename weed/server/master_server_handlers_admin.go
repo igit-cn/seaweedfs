@@ -3,6 +3,7 @@ package weed_server
 import (
 	"context"
 	"fmt"
+	"github.com/chrislusf/seaweedfs/weed/pb"
 	"math/rand"
 	"net/http"
 	"strconv"
@@ -26,7 +27,7 @@ func (ms *MasterServer) collectionDeleteHandler(w http.ResponseWriter, r *http.R
 		return
 	}
 	for _, server := range collection.ListVolumeServers() {
-		err := operation.WithVolumeServerClient(server.Url(), ms.grpcDialOption, func(client volume_server_pb.VolumeServerClient) error {
+		err := operation.WithVolumeServerClient(false, server.ServerAddress(), ms.grpcDialOption, func(client volume_server_pb.VolumeServerClient) error {
 			_, deleteErr := client.DeleteCollection(context.Background(), &volume_server_pb.DeleteCollectionRequest{
 				Collection: collection.Name,
 			})
@@ -63,7 +64,7 @@ func (ms *MasterServer) volumeVacuumHandler(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	// glog.Infoln("garbageThreshold =", gcThreshold)
-	ms.Topo.Vacuum(ms.grpcDialOption, gcThreshold, ms.preallocateSize)
+	ms.Topo.Vacuum(ms.grpcDialOption, gcThreshold, 0, "", ms.preallocateSize)
 	ms.dirStatusHandler(w, r)
 }
 
@@ -74,6 +75,7 @@ func (ms *MasterServer) volumeGrowHandler(w http.ResponseWriter, r *http.Request
 		writeJsonError(w, r, http.StatusNotAcceptable, err)
 		return
 	}
+	glog.V(0).Infof("volumeGrowHandler received %v from %v", option.String(), r.RemoteAddr)
 
 	if count, err = strconv.Atoi(r.FormValue("count")); err == nil {
 		if ms.Topo.AvailableSpaceFor(option) < int64(count*option.ReplicaPlacement.GetCopyCount()) {
@@ -117,30 +119,17 @@ func (ms *MasterServer) redirectHandler(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-func (ms *MasterServer) selfUrl(r *http.Request) string {
-	if r.Host != "" {
-		return r.Host
-	}
-	return "localhost:" + strconv.Itoa(ms.option.Port)
-}
 func (ms *MasterServer) submitFromMasterServerHandler(w http.ResponseWriter, r *http.Request) {
 	if ms.Topo.IsLeader() {
-		submitForClientHandler(w, r, func() string { return ms.selfUrl(r) }, ms.grpcDialOption)
+		submitForClientHandler(w, r, func() pb.ServerAddress { return ms.option.Master }, ms.grpcDialOption)
 	} else {
 		masterUrl, err := ms.Topo.Leader()
 		if err != nil {
 			writeJsonError(w, r, http.StatusInternalServerError, err)
 		} else {
-			submitForClientHandler(w, r, func() string { return masterUrl }, ms.grpcDialOption)
+			submitForClientHandler(w, r, func() pb.ServerAddress { return masterUrl }, ms.grpcDialOption)
 		}
 	}
-}
-
-func (ms *MasterServer) shouldVolumeGrow(option *topology.VolumeGrowOption) bool {
-	vl := ms.Topo.GetVolumeLayout(option.Collection, option.ReplicaPlacement, option.Ttl, option.DiskType)
-	active, high := vl.GetActiveVolumeCount(option)
-	//glog.V(0).Infof("active volume: %d, high usage volume: %d\n", active, high)
-	return active <= high
 }
 
 func (ms *MasterServer) getVolumeGrowOption(r *http.Request) (*topology.VolumeGrowOption, error) {

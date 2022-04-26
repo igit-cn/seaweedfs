@@ -3,6 +3,7 @@ package command
 import (
 	"bufio"
 	"fmt"
+	"github.com/chrislusf/seaweedfs/weed/pb"
 	"io"
 	"math"
 	"math/rand"
@@ -10,7 +11,6 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -129,7 +129,7 @@ func runBenchmark(cmd *Command, args []string) bool {
 		defer pprof.StopCPUProfile()
 	}
 
-	b.masterClient = wdclient.NewMasterClient(b.grpcDialOption, "client", "", 0, "", strings.Split(*b.masters, ","))
+	b.masterClient = wdclient.NewMasterClient(b.grpcDialOption, "client", "", "", pb.ServerAddresses(*b.masters).ToAddressMap())
 	go b.masterClient.KeepConnectedToMaster()
 	b.masterClient.WaitUntilConnected()
 
@@ -212,7 +212,7 @@ func writeFiles(idChan chan int, fileIdLineChan chan string, s *stat) {
 				}
 				var jwtAuthorization security.EncodedJwt
 				if isSecure {
-					jwtAuthorization = operation.LookupJwt(b.masterClient.GetMaster(), df.fp.Fid)
+					jwtAuthorization = operation.LookupJwt(b.masterClient.GetMaster(), b.grpcDialOption, df.fp.Fid)
 				}
 				if e := util.Delete(fmt.Sprintf("http://%s/%s", df.fp.Server, df.fp.Fid), string(jwtAuthorization)); e == nil {
 					s.completed++

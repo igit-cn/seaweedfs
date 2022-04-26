@@ -13,6 +13,12 @@ build: binary
 	docker build --no-cache -t chrislusf/seaweedfs:local -f Dockerfile.local .
 	rm ./weed
 
+build_gorocksdb:
+	docker build --no-cache -t chrislusf/gorocksdb -f Dockerfile.go_rocksdb .
+
+build_rocksdb:
+	docker build --no-cache -t chrislusf/seaweedfs:rocksdb -f Dockerfile.rocksdb_large .
+
 s3tests_build:
 	docker build --no-cache -t chrislusf/ceph-s3-tests:local -f Dockerfile.s3tests .
 
@@ -24,6 +30,9 @@ dev_tls: build certstrap
 
 dev_mount: build
 	docker-compose -f compose/local-mount-compose.yml -p seaweedfs up
+
+run_image: build
+	docker run --rm -ti --device /dev/fuse --cap-add SYS_ADMIN --entrypoint /bin/sh chrislusf/seaweedfs:local
 
 profile_mount: build
 	docker-compose -f compose/local-mount-profile-compose.yml -p seaweedfs up
@@ -37,11 +46,17 @@ dev_registry: build
 dev_replicate: build
 	docker-compose -f compose/local-replicate-compose.yml -p seaweedfs up
 
+dev_auditlog: build
+	docker-compose -f compose/local-auditlog-compose.yml -p seaweedfs up
+
 cluster: build
 	docker-compose -f compose/local-cluster-compose.yml -p seaweedfs up
 
 2clusters: build
 	docker-compose -f compose/local-clusters-compose.yml -p seaweedfs up
+
+hashicorp_raft: build
+	docker-compose -f compose/local-hashicorp-raft-compose.yml -p seaweedfs up
 
 s3tests: build s3tests_build
 	docker-compose -f compose/local-s3tests-compose.yml -p seaweedfs up

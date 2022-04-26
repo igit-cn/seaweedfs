@@ -5,8 +5,9 @@ import (
 )
 
 var (
-	VERSION = fmt.Sprintf("%s %d.%02d", sizeLimit, 2, 49)
-	COMMIT  = ""
+	VERSION_NUMBER = fmt.Sprintf("%.02f", 3.00)
+	VERSION        = sizeLimit + " " + VERSION_NUMBER
+	COMMIT         = ""
 )
 
 func Version() string {

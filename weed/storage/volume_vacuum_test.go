@@ -1,9 +1,7 @@
 package storage
 
 import (
-	"io/ioutil"
 	"math/rand"
-	"os"
 	"testing"
 	"time"
 
@@ -45,7 +43,7 @@ preparing test prerequisite easier )
 func TestMakeDiff(t *testing.T) {
 
 	v := new(Volume)
-	//lastCompactIndexOffset value is the index file size before step 4
+	// lastCompactIndexOffset value is the index file size before step 4
 	v.lastCompactIndexOffset = 96
 	v.SuperBlock.Version = 0x2
 	/*
@@ -63,11 +61,7 @@ func TestMakeDiff(t *testing.T) {
 }
 
 func TestCompaction(t *testing.T) {
-	dir, err := ioutil.TempDir("", "example")
-	if err != nil {
-		t.Fatalf("temp dir creation: %v", err)
-	}
-	defer os.RemoveAll(dir) // clean up
+	dir := t.TempDir()
 
 	v, err := NewVolume(dir, dir, "", 1, NeedleMapInMemory, &super_block.ReplicaPlacement{}, &needle.TTL{}, 0, 0)
 	if err != nil {
@@ -84,7 +78,7 @@ func TestCompaction(t *testing.T) {
 	}
 
 	startTime := time.Now()
-	v.Compact2(0, 0)
+	v.Compact2(0, 0, nil)
 	speed := float64(v.ContentSize()) / time.Now().Sub(startTime).Seconds()
 	t.Logf("compaction speed: %.2f bytes/s", speed)
 
@@ -113,7 +107,7 @@ func TestCompaction(t *testing.T) {
 		}
 
 		n := newEmptyNeedle(uint64(i))
-		size, err := v.readNeedle(n, nil)
+		size, err := v.readNeedle(n, nil, nil)
 		if err != nil {
 			t.Fatalf("read file %d: %v", i, err)
 		}
@@ -129,7 +123,7 @@ func TestCompaction(t *testing.T) {
 }
 func doSomeWritesDeletes(i int, v *Volume, t *testing.T, infos []*needleInfo) {
 	n := newRandomNeedle(uint64(i))
-	_, size, _, err := v.writeNeedle2(n, false)
+	_, size, _, err := v.writeNeedle2(n, true, false)
 	if err != nil {
 		t.Fatalf("write file %d: %v", i, err)
 	}

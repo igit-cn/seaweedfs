@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/chrislusf/seaweedfs/weed/storage/types"
+	"github.com/chrislusf/seaweedfs/weed/util/mem"
 	"io"
 	"mime"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/chrislusf/seaweedfs/weed/glog"
@@ -26,8 +29,6 @@ import (
 var fileNameEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 
 func (vs *VolumeServer) GetOrHeadHandler(w http.ResponseWriter, r *http.Request) {
-
-	glog.V(9).Info(r.Method + " " + r.URL.Path + " " + r.Header.Get("Range"))
 
 	stats.VolumeServerRequestCounter.WithLabelValues("get").Inc()
 	start := time.Now()
@@ -58,14 +59,55 @@ func (vs *VolumeServer) GetOrHeadHandler(w http.ResponseWriter, r *http.Request)
 	hasVolume := vs.store.HasVolume(volumeId)
 	_, hasEcVolume := vs.store.FindEcVolume(volumeId)
 	if !hasVolume && !hasEcVolume {
-		if !vs.ReadRedirect {
-			glog.V(2).Infoln("volume is not local:", err, r.URL.Path)
+		if vs.ReadMode == "local" {
+			glog.V(0).Infoln("volume is not local:", err, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		lookupResult, err := operation.Lookup(vs.GetMaster, volumeId.String())
+		lookupResult, err := operation.LookupVolumeId(vs.GetMaster, vs.grpcDialOption, volumeId.String())
 		glog.V(2).Infoln("volume", volumeId, "found on", lookupResult, "error", err)
-		if err == nil && len(lookupResult.Locations) > 0 {
+		if err != nil || len(lookupResult.Locations) <= 0 {
+			glog.V(0).Infoln("lookup error:", err, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if vs.ReadMode == "proxy" {
+			// proxy client request to target server
+			u, _ := url.Parse(util.NormalizeUrl(lookupResult.Locations[0].Url))
+			r.URL.Host = u.Host
+			r.URL.Scheme = u.Scheme
+			request, err := http.NewRequest("GET", r.URL.String(), nil)
+			if err != nil {
+				glog.V(0).Infof("failed to instance http request of url %s: %v", r.URL.String(), err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			for k, vv := range r.Header {
+				for _, v := range vv {
+					request.Header.Add(k, v)
+				}
+			}
+
+			response, err := client.Do(request)
+			if err != nil {
+				glog.V(0).Infof("request remote url %s: %v", r.URL.String(), err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			defer util.CloseResponse(response)
+			// proxy target response to client
+			for k, vv := range response.Header {
+				for _, v := range vv {
+					w.Header().Add(k, v)
+				}
+			}
+			w.WriteHeader(response.StatusCode)
+			buf := mem.Allocate(128 * 1024)
+			defer mem.Free(buf)
+			io.CopyBuffer(w, response.Body, buf)
+			return
+		} else {
+			// redirect
 			u, _ := url.Parse(util.NormalizeUrl(lookupResult.Locations[0].PublicUrl))
 			u.Path = fmt.Sprintf("%s/%s,%s", u.Path, vid, fid)
 			arg := url.Values{}
@@ -74,12 +116,8 @@ func (vs *VolumeServer) GetOrHeadHandler(w http.ResponseWriter, r *http.Request)
 			}
 			u.RawQuery = arg.Encode()
 			http.Redirect(w, r, u.String(), http.StatusMovedPermanently)
-
-		} else {
-			glog.V(2).Infoln("lookup error:", err, r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
+			return
 		}
-		return
 	}
 	cookie := n.Cookie
 
@@ -88,11 +126,21 @@ func (vs *VolumeServer) GetOrHeadHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	var count int
-	if hasVolume {
-		count, err = vs.store.ReadVolumeNeedle(volumeId, n, readOption)
-	} else if hasEcVolume {
-		count, err = vs.store.ReadEcShardNeedle(volumeId, n)
+	var needleSize types.Size
+	onReadSizeFn := func(size types.Size) {
+		needleSize = size
+		atomic.AddInt64(&vs.inFlightDownloadDataSize, int64(needleSize))
 	}
+	if hasVolume {
+		count, err = vs.store.ReadVolumeNeedle(volumeId, n, readOption, onReadSizeFn)
+	} else if hasEcVolume {
+		count, err = vs.store.ReadEcShardNeedle(volumeId, n, onReadSizeFn)
+	}
+	defer func() {
+		atomic.AddInt64(&vs.inFlightDownloadDataSize, -int64(needleSize))
+		vs.inFlightDownloadDataLimitCond.Signal()
+	}()
+
 	if err != nil && err != storage.ErrorDeleted && r.FormValue("type") != "replicate" && hasVolume {
 		glog.V(4).Infof("read needle: %v", err)
 		// start to fix it from other replicas, if not deleted and hasVolume and is not a replicated request
@@ -205,7 +253,7 @@ func (vs *VolumeServer) tryHandleChunkedFile(n *needle.Needle, fileName string, 
 
 	w.Header().Set("X-File-Store", "chunked")
 
-	chunkedFileReader := operation.NewChunkedFileReader(chunkManifest.Chunks, vs.GetMaster())
+	chunkedFileReader := operation.NewChunkedFileReader(chunkManifest.Chunks, vs.GetMaster(), vs.grpcDialOption)
 	defer chunkedFileReader.Close()
 
 	rs := conditionallyResizeImages(chunkedFileReader, ext, r)
@@ -229,7 +277,7 @@ func conditionallyResizeImages(originalDataReaderSeeker io.ReadSeeker, ext strin
 }
 
 func shouldResizeImages(ext string, r *http.Request) (width, height int, mode string, shouldResize bool) {
-	if ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif" {
+	if ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif" || ext == ".webp" {
 		if r.FormValue("width") != "" {
 			width, _ = strconv.Atoi(r.FormValue("width"))
 		}
@@ -254,7 +302,7 @@ func writeResponseContent(filename, mimeType string, rs io.ReadSeeker, w http.Re
 	}
 	w.Header().Set("Accept-Ranges", "bytes")
 
-	adjustHeaderContentDisposition(w, r, filename)
+	adjustPassthroughHeaders(w, r, filename)
 
 	if r.Method == "HEAD" {
 		w.Header().Set("Content-Length", strconv.FormatInt(totalSize, 10))

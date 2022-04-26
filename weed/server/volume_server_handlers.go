@@ -1,6 +1,7 @@
 package weed_server
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -37,6 +38,18 @@ func (vs *VolumeServer) privateStoreHandler(w http.ResponseWriter, r *http.Reque
 	switch r.Method {
 	case "GET", "HEAD":
 		stats.ReadRequest()
+		vs.inFlightDownloadDataLimitCond.L.Lock()
+		for vs.concurrentDownloadLimit != 0 && atomic.LoadInt64(&vs.inFlightDownloadDataSize) > vs.concurrentDownloadLimit {
+			select {
+			case <-r.Context().Done():
+				glog.V(4).Infof("request cancelled from %s: %v", r.RemoteAddr, r.Context().Err())
+				return
+			default:
+				glog.V(4).Infof("wait because inflight download data %d > %d", vs.inFlightDownloadDataSize, vs.concurrentDownloadLimit)
+				vs.inFlightDownloadDataLimitCond.Wait()
+			}
+		}
+		vs.inFlightDownloadDataLimitCond.L.Unlock()
 		vs.GetOrHeadHandler(w, r)
 	case "DELETE":
 		stats.DeleteRequest()
@@ -45,15 +58,18 @@ func (vs *VolumeServer) privateStoreHandler(w http.ResponseWriter, r *http.Reque
 
 		// wait until in flight data is less than the limit
 		contentLength := getContentLength(r)
-		vs.inFlightDataLimitCond.L.Lock()
-		for atomic.LoadInt64(&vs.inFlightDataSize) > vs.concurrentUploadLimit {
-			vs.inFlightDataLimitCond.Wait()
+
+		// exclude the replication from the concurrentUploadLimitMB
+		if vs.concurrentUploadLimit != 0 && r.URL.Query().Get("type") != "replicate" &&
+			atomic.LoadInt64(&vs.inFlightUploadDataSize) > vs.concurrentUploadLimit {
+			err := fmt.Errorf("reject because inflight upload data %d > %d", vs.inFlightUploadDataSize, vs.concurrentUploadLimit)
+			glog.V(1).Infof("too many requests: %v", err)
+			writeJsonError(w, r, http.StatusTooManyRequests, err)
+			return
 		}
-		atomic.AddInt64(&vs.inFlightDataSize, contentLength)
-		vs.inFlightDataLimitCond.L.Unlock()
+		atomic.AddInt64(&vs.inFlightUploadDataSize, contentLength)
 		defer func() {
-			atomic.AddInt64(&vs.inFlightDataSize, -contentLength)
-			vs.inFlightDataLimitCond.Signal()
+			atomic.AddInt64(&vs.inFlightUploadDataSize, -contentLength)
 		}()
 
 		// processs uploads
@@ -86,11 +102,14 @@ func (vs *VolumeServer) publicReadOnlyHandler(w http.ResponseWriter, r *http.Req
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
 	}
 	switch r.Method {
-	case "GET":
+	case "GET", "HEAD":
 		stats.ReadRequest()
-		vs.GetOrHeadHandler(w, r)
-	case "HEAD":
-		stats.ReadRequest()
+		vs.inFlightDownloadDataLimitCond.L.Lock()
+		for vs.concurrentDownloadLimit != 0 && atomic.LoadInt64(&vs.inFlightDownloadDataSize) > vs.concurrentDownloadLimit {
+			glog.V(4).Infof("wait because inflight download data %d > %d", vs.inFlightDownloadDataSize, vs.concurrentDownloadLimit)
+			vs.inFlightDownloadDataLimitCond.Wait()
+		}
+		vs.inFlightDownloadDataLimitCond.L.Unlock()
 		vs.GetOrHeadHandler(w, r)
 	case "OPTIONS":
 		stats.ReadRequest()
@@ -123,7 +142,7 @@ func (vs *VolumeServer) maybeCheckJwtAuthorization(r *http.Request, vid, fid str
 		return false
 	}
 
-	token, err := security.DecodeJwt(signingKey, tokenStr)
+	token, err := security.DecodeJwt(signingKey, tokenStr, &security.SeaweedFileIdClaims{})
 	if err != nil {
 		glog.V(1).Infof("jwt verification error from %s: %v", r.RemoteAddr, err)
 		return false

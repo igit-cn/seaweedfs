@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/chrislusf/seaweedfs/weed/util"
+	"io"
 )
 
 var (
@@ -43,4 +44,9 @@ type FilerStore interface {
 type BucketAware interface {
 	OnBucketCreation(bucket string)
 	OnBucketDeletion(bucket string)
+	CanDropWholeBucket() bool
+}
+
+type Debuggable interface {
+	Debug(writer io.Writer)
 }

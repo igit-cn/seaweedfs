@@ -3,14 +3,12 @@ package operation
 import (
 	"context"
 	"fmt"
-	"strings"
-
+	"github.com/chrislusf/seaweedfs/weed/pb"
 	"github.com/chrislusf/seaweedfs/weed/storage/needle"
 	"google.golang.org/grpc"
 
 	"github.com/chrislusf/seaweedfs/weed/pb/master_pb"
 	"github.com/chrislusf/seaweedfs/weed/security"
-	"github.com/chrislusf/seaweedfs/weed/util"
 )
 
 type VolumeAssignRequest struct {
@@ -29,9 +27,11 @@ type AssignResult struct {
 	Fid       string              `json:"fid,omitempty"`
 	Url       string              `json:"url,omitempty"`
 	PublicUrl string              `json:"publicUrl,omitempty"`
+	GrpcPort  int                 `json:"grpcPort,omitempty"`
 	Count     uint64              `json:"count,omitempty"`
 	Error     string              `json:"error,omitempty"`
 	Auth      security.EncodedJwt `json:"auth,omitempty"`
+	Replicas  []Location          `json:"replicas,omitempty"`
 }
 
 func Assign(masterFn GetMasterFn, grpcDialOption grpc.DialOption, primaryRequest *VolumeAssignRequest, alternativeRequests ...*VolumeAssignRequest) (*AssignResult, error) {
@@ -48,7 +48,7 @@ func Assign(masterFn GetMasterFn, grpcDialOption grpc.DialOption, primaryRequest
 			continue
 		}
 
-		lastError = WithMasterServerClient(masterFn(), grpcDialOption, func(masterClient master_pb.SeaweedClient) error {
+		lastError = WithMasterServerClient(false, masterFn(), grpcDialOption, func(masterClient master_pb.SeaweedClient) error {
 
 			req := &master_pb.AssignRequest{
 				Count:               request.Count,
@@ -66,12 +66,23 @@ func Assign(masterFn GetMasterFn, grpcDialOption grpc.DialOption, primaryRequest
 				return grpcErr
 			}
 
+			if resp.Error != "" {
+				return fmt.Errorf("assignRequest: %v", resp.Error)
+			}
+
 			ret.Count = resp.Count
 			ret.Fid = resp.Fid
-			ret.Url = resp.Url
-			ret.PublicUrl = resp.PublicUrl
+			ret.Url = resp.Location.Url
+			ret.PublicUrl = resp.Location.PublicUrl
+			ret.GrpcPort = int(resp.Location.GrpcPort)
 			ret.Error = resp.Error
 			ret.Auth = security.EncodedJwt(resp.Auth)
+			for _, r := range resp.Replicas {
+				ret.Replicas = append(ret.Replicas, Location{
+					Url:       r.Url,
+					PublicUrl: r.PublicUrl,
+				})
+			}
 
 			return nil
 
@@ -92,18 +103,28 @@ func Assign(masterFn GetMasterFn, grpcDialOption grpc.DialOption, primaryRequest
 	return ret, lastError
 }
 
-func LookupJwt(master string, fileId string) security.EncodedJwt {
+func LookupJwt(master pb.ServerAddress, grpcDialOption grpc.DialOption, fileId string) (token security.EncodedJwt) {
 
-	tokenStr := ""
+	WithMasterServerClient(false, master, grpcDialOption, func(masterClient master_pb.SeaweedClient) error {
 
-	if h, e := util.Head(fmt.Sprintf("http://%s/dir/lookup?fileId=%s", master, fileId)); e == nil {
-		bearer := h.Get("Authorization")
-		if len(bearer) > 7 && strings.ToUpper(bearer[0:6]) == "BEARER" {
-			tokenStr = bearer[7:]
+		resp, grpcErr := masterClient.LookupVolume(context.Background(), &master_pb.LookupVolumeRequest{
+			VolumeOrFileIds: []string{fileId},
+		})
+		if grpcErr != nil {
+			return grpcErr
 		}
-	}
 
-	return security.EncodedJwt(tokenStr)
+		if len(resp.VolumeIdLocations) == 0 {
+			return nil
+		}
+
+		token = security.EncodedJwt(resp.VolumeIdLocations[0].Auth)
+
+		return nil
+
+	})
+
+	return
 }
 
 type StorageOption struct {
@@ -112,6 +133,7 @@ type StorageOption struct {
 	Collection        string
 	DataCenter        string
 	Rack              string
+	DataNode          string
 	TtlSeconds        int32
 	Fsync             bool
 	VolumeGrowthCount uint32
@@ -130,9 +152,10 @@ func (so *StorageOption) ToAssignRequests(count int) (ar *VolumeAssignRequest, a
 		DiskType:            so.DiskType,
 		DataCenter:          so.DataCenter,
 		Rack:                so.Rack,
+		DataNode:            so.DataNode,
 		WritableVolumeCount: so.VolumeGrowthCount,
 	}
-	if so.DataCenter != "" || so.Rack != "" {
+	if so.DataCenter != "" || so.Rack != "" || so.DataNode != "" {
 		altRequest = &VolumeAssignRequest{
 			Count:               uint64(count),
 			Replication:         so.Replication,
@@ -141,6 +164,7 @@ func (so *StorageOption) ToAssignRequests(count int) (ar *VolumeAssignRequest, a
 			DiskType:            so.DiskType,
 			DataCenter:          "",
 			Rack:                "",
+			DataNode:            "",
 			WritableVolumeCount: so.VolumeGrowthCount,
 		}
 	}

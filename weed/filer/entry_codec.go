@@ -12,14 +12,8 @@ import (
 )
 
 func (entry *Entry) EncodeAttributesAndChunks() ([]byte, error) {
-	message := &filer_pb.Entry{
-		Attributes:      EntryAttributeToPb(entry),
-		Chunks:          entry.Chunks,
-		Extended:        entry.Extended,
-		HardLinkId:      entry.HardLinkId,
-		HardLinkCounter: entry.HardLinkCounter,
-		Content:         entry.Content,
-	}
+	message := &filer_pb.Entry{}
+	entry.ToExistingProtoEntry(message)
 	return proto.Marshal(message)
 }
 
@@ -31,15 +25,7 @@ func (entry *Entry) DecodeAttributesAndChunks(blob []byte) error {
 		return fmt.Errorf("decoding value blob for %s: %v", entry.FullPath, err)
 	}
 
-	entry.Attr = PbToEntryAttribute(message.Attributes)
-
-	entry.Extended = message.Extended
-
-	entry.Chunks = message.Chunks
-
-	entry.HardLinkId = message.HardLinkId
-	entry.HardLinkCounter = message.HardLinkCounter
-	entry.Content = message.Content
+	FromPbEntryToExistingEntry(message, entry)
 
 	return nil
 }
@@ -62,6 +48,8 @@ func EntryAttributeToPb(entry *Entry) *filer_pb.FuseAttributes {
 		SymlinkTarget: entry.Attr.SymlinkTarget,
 		Md5:           entry.Attr.Md5,
 		FileSize:      entry.Attr.FileSize,
+		Rdev:          entry.Attr.Rdev,
+		Inode:         entry.Attr.Inode,
 	}
 }
 
@@ -88,6 +76,8 @@ func PbToEntryAttribute(attr *filer_pb.FuseAttributes) Attr {
 	t.SymlinkTarget = attr.SymlinkTarget
 	t.Md5 = attr.Md5
 	t.FileSize = attr.FileSize
+	t.Rdev = attr.Rdev
+	t.Inode = attr.Inode
 
 	return t
 }
@@ -127,6 +117,12 @@ func EqualEntry(a, b *Entry) bool {
 		return false
 	}
 	if !bytes.Equal(a.Content, b.Content) {
+		return false
+	}
+	if !proto.Equal(a.Remote, b.Remote) {
+		return false
+	}
+	if a.Quota != b.Quota {
 		return false
 	}
 	return true

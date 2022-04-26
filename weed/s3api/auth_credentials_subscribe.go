@@ -1,16 +1,14 @@
 package s3api
 
 import (
-	"context"
-	"fmt"
 	"github.com/chrislusf/seaweedfs/weed/filer"
 	"github.com/chrislusf/seaweedfs/weed/glog"
+	"github.com/chrislusf/seaweedfs/weed/pb"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
-	"io"
-	"time"
+	"github.com/chrislusf/seaweedfs/weed/util"
 )
 
-func (s3a *S3ApiServer) subscribeMetaEvents(clientName string, prefix string, lastTsNs int64) error {
+func (s3a *S3ApiServer) subscribeMetaEvents(clientName string, prefix string, lastTsNs int64) {
 
 	processEventFn := func(resp *filer_pb.SubscribeMetadataResponse) error {
 
@@ -34,37 +32,11 @@ func (s3a *S3ApiServer) subscribeMetaEvents(clientName string, prefix string, la
 		return nil
 	}
 
-	for {
-		err := s3a.WithFilerClient(func(client filer_pb.SeaweedFilerClient) error {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			stream, err := client.SubscribeMetadata(ctx, &filer_pb.SubscribeMetadataRequest{
-				ClientName: clientName,
-				PathPrefix: prefix,
-				SinceNs:    lastTsNs,
-			})
-			if err != nil {
-				return fmt.Errorf("subscribe: %v", err)
-			}
+	util.RetryForever("followIamChanges", func() error {
+		return pb.WithFilerClientFollowMetadata(s3a, clientName, s3a.randomClientId, prefix, &lastTsNs, 0, processEventFn, true)
+	}, func(err error) bool {
+		glog.V(0).Infof("iam follow metadata changes: %v", err)
+		return true
+	})
 
-			for {
-				resp, listenErr := stream.Recv()
-				if listenErr == io.EOF {
-					return nil
-				}
-				if listenErr != nil {
-					return listenErr
-				}
-
-				if err := processEventFn(resp); err != nil {
-					glog.Fatalf("process %v: %v", resp, err)
-				}
-				lastTsNs = resp.TsNs
-			}
-		})
-		if err != nil {
-			glog.Errorf("subscribing filer meta change: %v", err)
-		}
-		time.Sleep(time.Second)
-	}
 }

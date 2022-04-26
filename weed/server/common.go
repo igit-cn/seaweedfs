@@ -1,13 +1,17 @@
 package weed_server
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	xhttp "github.com/chrislusf/seaweedfs/weed/s3api/http"
 	"io"
 	"io/fs"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -32,7 +36,24 @@ func init() {
 	go serverStats.Start()
 }
 
+// bodyAllowedForStatus is a copy of http.bodyAllowedForStatus non-exported function.
+func bodyAllowedForStatus(status int) bool {
+	switch {
+	case status >= 100 && status <= 199:
+		return false
+	case status == http.StatusNoContent:
+		return false
+	case status == http.StatusNotModified:
+		return false
+	}
+	return true
+}
+
 func writeJson(w http.ResponseWriter, r *http.Request, httpStatus int, obj interface{}) (err error) {
+	if !bodyAllowedForStatus(httpStatus) {
+		return
+	}
+
 	var bytes []byte
 	if obj != nil {
 		if r.FormValue("pretty") != "" {
@@ -104,7 +125,9 @@ func submitForClientHandler(w http.ResponseWriter, r *http.Request, masterFn ope
 	}
 
 	debug("parsing upload file...")
-	pu, pe := needle.ParseUpload(r, 256*1024*1024)
+	bytesBuffer := bufPool.Get().(*bytes.Buffer)
+	defer bufPool.Put(bytesBuffer)
+	pu, pe := needle.ParseUpload(r, 256*1024*1024, bytesBuffer)
 	if pe != nil {
 		writeJsonError(w, r, http.StatusBadRequest, pe)
 		return
@@ -141,7 +164,16 @@ func submitForClientHandler(w http.ResponseWriter, r *http.Request, masterFn ope
 	}
 
 	debug("upload file to store", url)
-	uploadResult, err := operation.UploadData(url, pu.FileName, false, pu.Data, pu.IsGzipped, pu.MimeType, pu.PairMap, assignResult.Auth)
+	uploadOption := &operation.UploadOption{
+		UploadUrl:         url,
+		Filename:          pu.FileName,
+		Cipher:            false,
+		IsInputCompressed: pu.IsGzipped,
+		MimeType:          pu.MimeType,
+		PairMap:           pu.PairMap,
+		Jwt:               assignResult.Auth,
+	}
+	uploadResult, err := operation.UploadData(pu.Data, uploadOption)
 	if err != nil {
 		writeJsonError(w, r, http.StatusInternalServerError, err)
 		return
@@ -220,8 +252,20 @@ func handleStaticResources2(r *mux.Router) {
 	r.PathPrefix("/seaweedfsstatic/").Handler(http.StripPrefix("/seaweedfsstatic", http.FileServer(http.FS(StaticFS))))
 }
 
+func adjustPassthroughHeaders(w http.ResponseWriter, r *http.Request, filename string) {
+	for header, values := range r.Header {
+		if normalizedHeader, ok := xhttp.PassThroughHeaders[strings.ToLower(header)]; ok {
+			w.Header()[normalizedHeader] = values
+		}
+	}
+	adjustHeaderContentDisposition(w, r, filename)
+}
 func adjustHeaderContentDisposition(w http.ResponseWriter, r *http.Request, filename string) {
+	if contentDisposition := w.Header().Get("Content-Disposition"); contentDisposition != "" {
+		return
+	}
 	if filename != "" {
+		filename = url.QueryEscape(filename)
 		contentDisposition := "inline"
 		if r.FormValue("dl") != "" {
 			if dl, _ := strconv.ParseBool(r.FormValue("dl")); dl {
@@ -234,10 +278,12 @@ func adjustHeaderContentDisposition(w http.ResponseWriter, r *http.Request, file
 
 func processRangeRequest(r *http.Request, w http.ResponseWriter, totalSize int64, mimeType string, writeFn func(writer io.Writer, offset int64, size int64) error) {
 	rangeReq := r.Header.Get("Range")
+	bufferedWriter := bufio.NewWriterSize(w, 128*1024)
+	defer bufferedWriter.Flush()
 
 	if rangeReq == "" {
 		w.Header().Set("Content-Length", strconv.FormatInt(totalSize, 10))
-		if err := writeFn(w, 0, totalSize); err != nil {
+		if err := writeFn(bufferedWriter, 0, totalSize); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -277,7 +323,8 @@ func processRangeRequest(r *http.Request, w http.ResponseWriter, totalSize int64
 		w.Header().Set("Content-Length", strconv.FormatInt(ra.length, 10))
 		w.Header().Set("Content-Range", ra.contentRange(totalSize))
 
-		err = writeFn(w, ra.start, ra.length)
+		w.WriteHeader(http.StatusPartialContent)
+		err = writeFn(bufferedWriter, ra.start, ra.length)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -317,7 +364,7 @@ func processRangeRequest(r *http.Request, w http.ResponseWriter, totalSize int64
 		w.Header().Set("Content-Length", strconv.FormatInt(sendSize, 10))
 	}
 	w.WriteHeader(http.StatusPartialContent)
-	if _, err := io.CopyN(w, sendContent, sendSize); err != nil {
+	if _, err := io.CopyN(bufferedWriter, sendContent, sendSize); err != nil {
 		http.Error(w, "Internal Error", http.StatusInternalServerError)
 		return
 	}

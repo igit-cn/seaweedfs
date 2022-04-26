@@ -3,20 +3,54 @@ package stats
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/client_golang/prometheus/push"
-
-	"github.com/chrislusf/seaweedfs/weed/glog"
 )
 
 var (
 	Gather = prometheus.NewRegistry()
+
+	MasterClientConnectCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "SeaweedFS",
+			Subsystem: "wdclient",
+			Name:      "connect_updates",
+			Help:      "Counter of master client leader updates.",
+		}, []string{"type"})
+
+	MasterRaftIsleader = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "SeaweedFS",
+			Subsystem: "master",
+			Name:      "is_leader",
+			Help:      "is leader",
+		})
+
+	MasterReceivedHeartbeatCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "SeaweedFS",
+			Subsystem: "master",
+			Name:      "received_heartbeats",
+			Help:      "Counter of master received heartbeat.",
+		}, []string{"type"})
+
+	MasterLeaderChangeCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "SeaweedFS",
+			Subsystem: "master",
+			Name:      "leader_changes",
+			Help:      "Counter of master leader changes.",
+		}, []string{"type"})
 
 	FilerRequestCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -127,12 +161,17 @@ var (
 )
 
 func init() {
+	Gather.MustRegister(MasterClientConnectCounter)
+	Gather.MustRegister(MasterRaftIsleader)
+	Gather.MustRegister(MasterReceivedHeartbeatCounter)
+	Gather.MustRegister(MasterLeaderChangeCounter)
 
 	Gather.MustRegister(FilerRequestCounter)
 	Gather.MustRegister(FilerRequestHistogram)
 	Gather.MustRegister(FilerStoreCounter)
 	Gather.MustRegister(FilerStoreHistogram)
-	Gather.MustRegister(prometheus.NewGoCollector())
+	Gather.MustRegister(collectors.NewGoCollector())
+	Gather.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 
 	Gather.MustRegister(VolumeServerRequestCounter)
 	Gather.MustRegister(VolumeServerRequestHistogram)
@@ -147,7 +186,6 @@ func init() {
 }
 
 func LoopPushingMetric(name, instance, addr string, intervalSeconds int) {
-
 	if addr == "" || intervalSeconds == 0 {
 		return
 	}
@@ -165,7 +203,6 @@ func LoopPushingMetric(name, instance, addr string, intervalSeconds int) {
 			intervalSeconds = 15
 		}
 		time.Sleep(time.Duration(intervalSeconds) * time.Second)
-
 	}
 }
 
@@ -182,5 +219,5 @@ func SourceName(port uint32) string {
 	if err != nil {
 		return "unknown"
 	}
-	return fmt.Sprintf("%s:%d", hostname, port)
+	return net.JoinHostPort(hostname, strconv.Itoa(int(port)))
 }

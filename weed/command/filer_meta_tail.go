@@ -1,18 +1,14 @@
 package command
 
 import (
-	"context"
 	"fmt"
+	"github.com/chrislusf/seaweedfs/weed/pb"
 	"github.com/golang/protobuf/jsonpb"
-	jsoniter "github.com/json-iterator/go"
-	"github.com/olivere/elastic/v7"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/chrislusf/seaweedfs/weed/pb"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
 	"github.com/chrislusf/seaweedfs/weed/security"
 	"github.com/chrislusf/seaweedfs/weed/util"
@@ -31,6 +27,8 @@ var cmdFilerMetaTail = &Command{
 	weed filer.meta.tail -timeAgo=30h | jq .
 	weed filer.meta.tail -timeAgo=30h | jq .eventNotification.newEntry.name
 
+	weed filer.meta.tail -timeAgo=30h -es=http://<elasticSearchServerHost>:<port> -es.index=seaweedfs
+
   `,
 }
 
@@ -45,7 +43,9 @@ var (
 
 func runFilerMetaTail(cmd *Command, args []string) bool {
 
+	util.LoadConfiguration("security", false)
 	grpcDialOption := security.LoadClientTLS(util.GetViper(), "grpc.client")
+	clientId := util.RandomInt32()
 
 	var filterFunc func(dir, fname string) bool
 	if *tailPattern != "" {
@@ -71,11 +71,11 @@ func runFilerMetaTail(cmd *Command, args []string) bool {
 	}
 
 	shouldPrint := func(resp *filer_pb.SubscribeMetadataResponse) bool {
+		if filer_pb.IsEmpty(resp) {
+			return false
+		}
 		if filterFunc == nil {
 			return true
-		}
-		if resp.EventNotification.OldEntry == nil && resp.EventNotification.NewEntry == nil {
-			return false
 		}
 		if resp.EventNotification.OldEntry != nil && filterFunc(resp.Directory, resp.EventNotification.OldEntry.Name) {
 			return true
@@ -103,109 +103,21 @@ func runFilerMetaTail(cmd *Command, args []string) bool {
 		}
 	}
 
-	tailErr := pb.WithFilerClient(*tailFiler, grpcDialOption, func(client filer_pb.SeaweedFilerClient) error {
-
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		stream, err := client.SubscribeMetadata(ctx, &filer_pb.SubscribeMetadataRequest{
-			ClientName: "tail",
-			PathPrefix: *tailTarget,
-			SinceNs:    time.Now().Add(-*tailStart).UnixNano(),
-		})
-		if err != nil {
-			return fmt.Errorf("listen: %v", err)
-		}
-
-		for {
-			resp, listenErr := stream.Recv()
-			if listenErr == io.EOF {
+	tailErr := pb.FollowMetadata(pb.ServerAddress(*tailFiler), grpcDialOption, "tail", clientId,
+		*tailTarget, nil, time.Now().Add(-*tailStart).UnixNano(), 0,
+		func(resp *filer_pb.SubscribeMetadataResponse) error {
+			if !shouldPrint(resp) {
 				return nil
 			}
-			if listenErr != nil {
-				return listenErr
-			}
-			if !shouldPrint(resp) {
-				continue
-			}
-			if err = eachEntryFunc(resp); err != nil {
+			if err := eachEntryFunc(resp); err != nil {
 				return err
 			}
-		}
+			return nil
+		}, false)
 
-	})
 	if tailErr != nil {
 		fmt.Printf("tail %s: %v\n", *tailFiler, tailErr)
 	}
 
 	return true
-}
-
-type EsDocument struct {
-	Dir         string `json:"dir,omitempty"`
-	Name        string `json:"name,omitempty"`
-	IsDirectory bool   `json:"isDir,omitempty"`
-	Size        uint64 `json:"size,omitempty"`
-	Uid         uint32 `json:"uid,omitempty"`
-	Gid         uint32 `json:"gid,omitempty"`
-	UserName    string `json:"userName,omitempty"`
-	Collection  string `json:"collection,omitempty"`
-	Crtime      int64  `json:"crtime,omitempty"`
-	Mtime       int64  `json:"mtime,omitempty"`
-	Mime        string `json:"mime,omitempty"`
-}
-
-func toEsEntry(event *filer_pb.EventNotification) (*EsDocument, string) {
-	entry := event.NewEntry
-	dir, name := event.NewParentPath, entry.Name
-	id := util.Md5String([]byte(util.NewFullPath(dir, name)))
-	esEntry := &EsDocument{
-		Dir:         dir,
-		Name:        name,
-		IsDirectory: entry.IsDirectory,
-		Size:        entry.Attributes.FileSize,
-		Uid:         entry.Attributes.Uid,
-		Gid:         entry.Attributes.Gid,
-		UserName:    entry.Attributes.UserName,
-		Collection:  entry.Attributes.Collection,
-		Crtime:      entry.Attributes.Crtime,
-		Mtime:       entry.Attributes.Mtime,
-		Mime:        entry.Attributes.Mime,
-	}
-	return esEntry, id
-}
-
-func sendToElasticSearchFunc(servers string, esIndex string) (func(resp *filer_pb.SubscribeMetadataResponse) error, error) {
-	options := []elastic.ClientOptionFunc{}
-	options = append(options, elastic.SetURL(strings.Split(servers, ",")...))
-	options = append(options, elastic.SetSniff(false))
-	options = append(options, elastic.SetHealthcheck(false))
-	client, err := elastic.NewClient(options...)
-	if err != nil {
-		return nil, err
-	}
-	return func(resp *filer_pb.SubscribeMetadataResponse) error {
-		event := resp.EventNotification
-		if event.OldEntry != nil &&
-			(event.NewEntry == nil || resp.Directory != event.NewParentPath || event.OldEntry.Name != event.NewEntry.Name) {
-			// delete or not update the same file
-			dir, name := resp.Directory, event.OldEntry.Name
-			id := util.Md5String([]byte(util.NewFullPath(dir, name)))
-			println("delete", id)
-			_, err := client.Delete().Index(esIndex).Id(id).Do(context.Background())
-			return err
-		}
-		if event.NewEntry != nil {
-			// add a new file or update the same file
-			esEntry, id := toEsEntry(event)
-			value, err := jsoniter.Marshal(esEntry)
-			if err != nil {
-				return err
-			}
-			println(string(value))
-			_, err = client.Index().Index(esIndex).Id(id).BodyJson(string(value)).Do(context.Background())
-			return err
-		}
-		return nil
-	}, nil
 }

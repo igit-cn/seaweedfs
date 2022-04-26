@@ -7,7 +7,6 @@ import (
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/spf13/viper"
 	"google.golang.org/grpc"
-	"io"
 	"reflect"
 	"time"
 
@@ -28,7 +27,8 @@ type FilerMetaBackupOptions struct {
 	restart           *bool
 	backupFilerConfig *string
 
-	store filer.FilerStore
+	store    filer.FilerStore
+	clientId int32
 }
 
 func init() {
@@ -37,6 +37,7 @@ func init() {
 	metaBackup.filerDirectory = cmdFilerMetaBackup.Flag.String("filerDir", "/", "a folder on the filer")
 	metaBackup.restart = cmdFilerMetaBackup.Flag.Bool("restart", false, "copy the full metadata before async incremental backup")
 	metaBackup.backupFilerConfig = cmdFilerMetaBackup.Flag.String("config", "", "path to filer.toml specifying backup filer store")
+	metaBackup.clientId = util.RandomInt32()
 }
 
 var cmdFilerMetaBackup = &Command{
@@ -53,6 +54,7 @@ The backup writes to another filer store specified in a backup_filer.toml.
 
 func runFilerMetaBackup(cmd *Command, args []string) bool {
 
+	util.LoadConfiguration("security", false)
 	metaBackup.grpcDialOption = security.LoadClientTLS(util.GetViper(), "grpc.client")
 
 	// load backup_filer.toml
@@ -160,24 +162,21 @@ func (metaBackup *FilerMetaBackupOptions) streamMetadataBackup() error {
 		ctx := context.Background()
 		message := resp.EventNotification
 
-		if message.OldEntry == nil && message.NewEntry == nil {
+		if filer_pb.IsEmpty(resp) {
 			return nil
-		}
-		if message.OldEntry == nil && message.NewEntry != nil {
+		} else if filer_pb.IsCreate(resp) {
 			println("+", util.FullPath(message.NewParentPath).Child(message.NewEntry.Name))
 			entry := filer.FromPbEntry(message.NewParentPath, message.NewEntry)
 			return store.InsertEntry(ctx, entry)
-		}
-		if message.OldEntry != nil && message.NewEntry == nil {
+		} else if filer_pb.IsDelete(resp) {
 			println("-", util.FullPath(resp.Directory).Child(message.OldEntry.Name))
 			return store.DeleteEntry(ctx, util.FullPath(resp.Directory).Child(message.OldEntry.Name))
-		}
-		if message.OldEntry != nil && message.NewEntry != nil {
-			if resp.Directory == message.NewParentPath && message.OldEntry.Name == message.NewEntry.Name {
-				println("~", util.FullPath(message.NewParentPath).Child(message.NewEntry.Name))
-				entry := filer.FromPbEntry(message.NewParentPath, message.NewEntry)
-				return store.UpdateEntry(ctx, entry)
-			}
+		} else if filer_pb.IsUpdate(resp) {
+			println("~", util.FullPath(message.NewParentPath).Child(message.NewEntry.Name))
+			entry := filer.FromPbEntry(message.NewParentPath, message.NewEntry)
+			return store.UpdateEntry(ctx, entry)
+		} else {
+			// renaming
 			println("-", util.FullPath(resp.Directory).Child(message.OldEntry.Name))
 			if err := store.DeleteEntry(ctx, util.FullPath(resp.Directory).Child(message.OldEntry.Name)); err != nil {
 				return err
@@ -189,48 +188,15 @@ func (metaBackup *FilerMetaBackupOptions) streamMetadataBackup() error {
 		return nil
 	}
 
-	tailErr := pb.WithFilerClient(*metaBackup.filerAddress, metaBackup.grpcDialOption, func(client filer_pb.SeaweedFilerClient) error {
-
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		stream, err := client.SubscribeMetadata(ctx, &filer_pb.SubscribeMetadataRequest{
-			ClientName: "meta_backup",
-			PathPrefix: *metaBackup.filerDirectory,
-			SinceNs:    startTime.UnixNano(),
-		})
-		if err != nil {
-			return fmt.Errorf("listen: %v", err)
-		}
-
-		var counter int64
-		var lastWriteTime time.Time
-		for {
-			resp, listenErr := stream.Recv()
-			if listenErr == io.EOF {
-				return nil
-			}
-			if listenErr != nil {
-				return listenErr
-			}
-			if err = eachEntryFunc(resp); err != nil {
-				return err
-			}
-
-			counter++
-			if lastWriteTime.Add(3 * time.Second).Before(time.Now()) {
-				glog.V(0).Infof("meta backup %s progressed to %v %0.2f/sec", *metaBackup.filerAddress, time.Unix(0, resp.TsNs), float64(counter)/float64(3))
-				counter = 0
-				lastWriteTime = time.Now()
-				if err2 := metaBackup.setOffset(lastWriteTime); err2 != nil {
-					return err2
-				}
-			}
-
-		}
-
+	processEventFnWithOffset := pb.AddOffsetFunc(eachEntryFunc, 3*time.Second, func(counter int64, lastTsNs int64) error {
+		lastTime := time.Unix(0, lastTsNs)
+		glog.V(0).Infof("meta backup %s progressed to %v %0.2f/sec", *metaBackup.filerAddress, lastTime, float64(counter)/float64(3))
+		return metaBackup.setOffset(lastTime)
 	})
-	return tailErr
+
+	return pb.FollowMetadata(pb.ServerAddress(*metaBackup.filerAddress), metaBackup.grpcDialOption, "meta_backup", metaBackup.clientId,
+		*metaBackup.filerDirectory, nil, startTime.UnixNano(), 0, processEventFnWithOffset, false)
+
 }
 
 func (metaBackup *FilerMetaBackupOptions) getOffset() (lastWriteTime time.Time, err error) {
@@ -255,9 +221,9 @@ func (metaBackup *FilerMetaBackupOptions) setOffset(lastWriteTime time.Time) err
 
 var _ = filer_pb.FilerClient(&FilerMetaBackupOptions{})
 
-func (metaBackup *FilerMetaBackupOptions) WithFilerClient(fn func(filer_pb.SeaweedFilerClient) error) error {
+func (metaBackup *FilerMetaBackupOptions) WithFilerClient(streamingMode bool, fn func(filer_pb.SeaweedFilerClient) error) error {
 
-	return pb.WithFilerClient(*metaBackup.filerAddress, metaBackup.grpcDialOption, func(client filer_pb.SeaweedFilerClient) error {
+	return pb.WithFilerClient(streamingMode, pb.ServerAddress(*metaBackup.filerAddress), metaBackup.grpcDialOption, func(client filer_pb.SeaweedFilerClient) error {
 		return fn(client)
 	})
 

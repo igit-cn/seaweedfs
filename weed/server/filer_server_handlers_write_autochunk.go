@@ -62,7 +62,8 @@ func (fs *FilerServer) autoChunk(ctx context.Context, w http.ResponseWriter, r *
 		}
 	} else if reply != nil {
 		if len(md5bytes) > 0 {
-			w.Header().Set("Content-MD5", util.Base64Encode(md5bytes))
+			md5InBase64 := util.Base64Encode(md5bytes)
+			w.Header().Set("Content-MD5", md5InBase64)
 		}
 		writeJsonQuiet(w, r, http.StatusCreated, reply)
 	}
@@ -96,6 +97,9 @@ func (fs *FilerServer) doPostAutoChunk(ctx context.Context, w http.ResponseWrite
 
 	md5bytes = md5Hash.Sum(nil)
 	filerResult, replyerr = fs.saveMetaData(ctx, r, fileName, contentType, so, md5bytes, fileChunks, chunkOffset, smallContent)
+	if replyerr != nil {
+		fs.filer.DeleteChunks(fileChunks)
+	}
 
 	return
 }
@@ -115,12 +119,19 @@ func (fs *FilerServer) doPutAutoChunk(ctx context.Context, w http.ResponseWriter
 
 	md5bytes = md5Hash.Sum(nil)
 	filerResult, replyerr = fs.saveMetaData(ctx, r, fileName, contentType, so, md5bytes, fileChunks, chunkOffset, smallContent)
+	if replyerr != nil {
+		fs.filer.DeleteChunks(fileChunks)
+	}
 
 	return
 }
 
 func isAppend(r *http.Request) bool {
 	return r.URL.Query().Get("op") == "append"
+}
+
+func skipCheckParentDirEntry(r *http.Request) bool {
+	return r.URL.Query().Get("skipCheckParentDir") == "true"
 }
 
 func (fs *FilerServer) saveMetaData(ctx context.Context, r *http.Request, fileName string, contentType string, so *operation.StorageOption, md5bytes []byte, fileChunks []*filer_pb.FileChunk, chunkOffset int64, content []byte) (filerResult *FilerPostResult, replyerr error) {
@@ -153,9 +164,13 @@ func (fs *FilerServer) saveMetaData(ctx context.Context, r *http.Request, fileNa
 	}
 
 	var entry *filer.Entry
+	var newChunks []*filer_pb.FileChunk
 	var mergedChunks []*filer_pb.FileChunk
+
+	isAppend := isAppend(r)
+	isOffsetWrite := len(fileChunks) > 0 && fileChunks[0].Offset > 0
 	// when it is an append
-	if isAppend(r) {
+	if isAppend || isOffsetWrite {
 		existingEntry, findErr := fs.filer.FindEntry(ctx, util.FullPath(path))
 		if findErr != nil && findErr != filer_pb.ErrNotFound {
 			glog.V(0).Infof("failing to find %s: %v", path, findErr)
@@ -166,11 +181,13 @@ func (fs *FilerServer) saveMetaData(ctx context.Context, r *http.Request, fileNa
 		entry.Mtime = time.Now()
 		entry.Md5 = nil
 		// adjust chunk offsets
-		for _, chunk := range fileChunks {
-			chunk.Offset += int64(entry.FileSize)
+		if isAppend {
+			for _, chunk := range fileChunks {
+				chunk.Offset += int64(entry.FileSize)
+			}
+			entry.FileSize += uint64(chunkOffset)
 		}
-		mergedChunks = append(entry.Chunks, fileChunks...)
-		entry.FileSize += uint64(chunkOffset)
+		newChunks = append(entry.Chunks, fileChunks...)
 
 		// TODO
 		if len(entry.Content) > 0 {
@@ -180,7 +197,7 @@ func (fs *FilerServer) saveMetaData(ctx context.Context, r *http.Request, fileNa
 
 	} else {
 		glog.V(4).Infoln("saving", path)
-		mergedChunks = fileChunks
+		newChunks = fileChunks
 		entry = &filer.Entry{
 			FullPath: util.FullPath(path),
 			Attr: filer.Attr{
@@ -201,6 +218,13 @@ func (fs *FilerServer) saveMetaData(ctx context.Context, r *http.Request, fileNa
 		}
 	}
 
+	// maybe concatenate small chunks into one whole chunk
+	mergedChunks, replyerr = fs.maybeMergeChunks(so, newChunks)
+	if replyerr != nil {
+		glog.V(0).Infof("merge chunks %s: %v", r.RequestURI, replyerr)
+		mergedChunks = newChunks
+	}
+
 	// maybe compact entry chunks
 	mergedChunks, replyerr = filer.MaybeManifestize(fs.saveAsChunk(so), mergedChunks)
 	if replyerr != nil {
@@ -208,26 +232,30 @@ func (fs *FilerServer) saveMetaData(ctx context.Context, r *http.Request, fileNa
 		return
 	}
 	entry.Chunks = mergedChunks
+	if isOffsetWrite {
+		entry.Md5 = nil
+		entry.FileSize = entry.Size()
+	}
 
 	filerResult = &FilerPostResult{
 		Name: fileName,
 		Size: int64(entry.FileSize),
 	}
 
-	if entry.Extended == nil {
-		entry.Extended = make(map[string][]byte)
-	}
-
-	SaveAmzMetaData(r, entry.Extended, false)
+	entry.Extended = SaveAmzMetaData(r, entry.Extended, false)
 
 	for k, v := range r.Header {
-		if len(v) > 0 && (strings.HasPrefix(k, needle.PairNamePrefix) || k == "Cache-Control" || k == "Expires") {
-			entry.Extended[k] = []byte(v[0])
+		if len(v) > 0 && len(v[0]) > 0 {
+			if strings.HasPrefix(k, needle.PairNamePrefix) || k == "Cache-Control" || k == "Expires" || k == "Content-Disposition" {
+				entry.Extended[k] = []byte(v[0])
+			}
+			if k == "Response-Content-Disposition" {
+				entry.Extended["Content-Disposition"] = []byte(v[0])
+			}
 		}
 	}
 
-	if dbErr := fs.filer.CreateEntry(ctx, entry, false, false, nil); dbErr != nil {
-		fs.filer.DeleteChunks(fileChunks)
+	if dbErr := fs.filer.CreateEntry(ctx, entry, false, false, nil, skipCheckParentDirEntry(r)); dbErr != nil {
 		replyerr = dbErr
 		filerResult.Error = dbErr.Error()
 		glog.V(0).Infof("failing to write %s to filer server : %v", path, dbErr)
@@ -245,7 +273,16 @@ func (fs *FilerServer) saveAsChunk(so *operation.StorageOption) filer.SaveDataAs
 		}
 
 		// upload the chunk to the volume server
-		uploadResult, uploadErr, _ := operation.Upload(urlLocation, name, fs.option.Cipher, reader, false, "", nil, auth)
+		uploadOption := &operation.UploadOption{
+			UploadUrl:         urlLocation,
+			Filename:          name,
+			Cipher:            fs.option.Cipher,
+			IsInputCompressed: false,
+			MimeType:          "",
+			PairMap:           nil,
+			Jwt:               auth,
+		}
+		uploadResult, uploadErr, _ := operation.Upload(reader, uploadOption)
 		if uploadErr != nil {
 			return nil, "", "", uploadErr
 		}
@@ -295,7 +332,7 @@ func (fs *FilerServer) mkdir(ctx context.Context, w http.ResponseWriter, r *http
 		Name: util.FullPath(path).Name(),
 	}
 
-	if dbErr := fs.filer.CreateEntry(ctx, entry, false, false, nil); dbErr != nil {
+	if dbErr := fs.filer.CreateEntry(ctx, entry, false, false, nil, false); dbErr != nil {
 		replyerr = dbErr
 		filerResult.Error = dbErr.Error()
 		glog.V(0).Infof("failing to create dir %s on filer server : %v", path, dbErr)
@@ -321,6 +358,8 @@ func SaveAmzMetaData(r *http.Request, existing map[string][]byte, isReplace bool
 			tag := strings.Split(v, "=")
 			if len(tag) == 2 {
 				metadata[xhttp.AmzObjectTagging+"-"+tag[0]] = []byte(tag[1])
+			} else if len(tag) == 1 {
+				metadata[xhttp.AmzObjectTagging+"-"+tag[0]] = nil
 			}
 		}
 	}

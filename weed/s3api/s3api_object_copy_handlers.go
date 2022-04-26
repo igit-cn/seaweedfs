@@ -3,6 +3,7 @@ package s3api
 import (
 	"fmt"
 	"github.com/chrislusf/seaweedfs/weed/glog"
+	xhttp "github.com/chrislusf/seaweedfs/weed/s3api/http"
 	"github.com/chrislusf/seaweedfs/weed/s3api/s3err"
 	weed_server "github.com/chrislusf/seaweedfs/weed/server"
 	"net/http"
@@ -16,7 +17,7 @@ import (
 
 func (s3a *S3ApiServer) CopyObjectHandler(w http.ResponseWriter, r *http.Request) {
 
-	dstBucket, dstObject := getBucketAndObject(r)
+	dstBucket, dstObject := xhttp.GetBucketAndObject(r)
 
 	// Copy source path.
 	cpSrcPath, err := url.QueryUnescape(r.Header.Get("X-Amz-Copy-Source"))
@@ -27,44 +28,54 @@ func (s3a *S3ApiServer) CopyObjectHandler(w http.ResponseWriter, r *http.Request
 
 	srcBucket, srcObject := pathToBucketAndObject(cpSrcPath)
 
+	glog.V(3).Infof("CopyObjectHandler %s %s => %s %s", srcBucket, srcObject, dstBucket, dstObject)
+
 	if (srcBucket == dstBucket && srcObject == dstObject || cpSrcPath == "") && isReplace(r) {
 		fullPath := util.FullPath(fmt.Sprintf("%s/%s%s", s3a.option.BucketsPath, dstBucket, dstObject))
 		dir, name := fullPath.DirAndName()
 		entry, err := s3a.getEntry(dir, name)
-		if err != nil {
-			writeErrorResponse(w, s3err.ErrInvalidCopySource, r.URL)
+		if err != nil || entry.IsDirectory {
+			s3err.WriteErrorResponse(w, r, s3err.ErrInvalidCopySource)
+			return
 		}
 		entry.Extended = weed_server.SaveAmzMetaData(r, entry.Extended, isReplace(r))
 		err = s3a.touch(dir, name, entry)
 		if err != nil {
-			writeErrorResponse(w, s3err.ErrInvalidCopySource, r.URL)
+			s3err.WriteErrorResponse(w, r, s3err.ErrInvalidCopySource)
+			return
 		}
-		writeSuccessResponseXML(w, encodeResponse(CopyObjectResult{
+		writeSuccessResponseXML(w, r, CopyObjectResult{
 			ETag:         fmt.Sprintf("%x", entry.Attributes.Md5),
 			LastModified: time.Now().UTC(),
-		}))
+		})
 		return
 	}
 
 	// If source object is empty or bucket is empty, reply back invalid copy source.
 	if srcObject == "" || srcBucket == "" {
-		writeErrorResponse(w, s3err.ErrInvalidCopySource, r.URL)
+		s3err.WriteErrorResponse(w, r, s3err.ErrInvalidCopySource)
+		return
+	}
+	srcPath := util.FullPath(fmt.Sprintf("%s/%s%s", s3a.option.BucketsPath, srcBucket, srcObject))
+	dir, name := srcPath.DirAndName()
+	if entry, err := s3a.getEntry(dir, name); err != nil || entry.IsDirectory {
+		s3err.WriteErrorResponse(w, r, s3err.ErrInvalidCopySource)
 		return
 	}
 
 	if srcBucket == dstBucket && srcObject == dstObject {
-		writeErrorResponse(w, s3err.ErrInvalidCopyDest, r.URL)
+		s3err.WriteErrorResponse(w, r, s3err.ErrInvalidCopyDest)
 		return
 	}
 
 	dstUrl := fmt.Sprintf("http://%s%s/%s%s?collection=%s",
-		s3a.option.Filer, s3a.option.BucketsPath, dstBucket, dstObject, dstBucket)
+		s3a.option.Filer.ToHttpAddress(), s3a.option.BucketsPath, dstBucket, urlPathEscape(dstObject), dstBucket)
 	srcUrl := fmt.Sprintf("http://%s%s/%s%s",
-		s3a.option.Filer, s3a.option.BucketsPath, srcBucket, srcObject)
+		s3a.option.Filer.ToHttpAddress(), s3a.option.BucketsPath, srcBucket, urlPathEscape(srcObject))
 
-	_, _, resp, err := util.DownloadFile(srcUrl)
+	_, _, resp, err := util.DownloadFile(srcUrl, s3a.maybeGetFilerJwtAuthorizationToken(false))
 	if err != nil {
-		writeErrorResponse(w, s3err.ErrInvalidCopySource, r.URL)
+		s3err.WriteErrorResponse(w, r, s3err.ErrInvalidCopySource)
 		return
 	}
 	defer util.CloseResponse(resp)
@@ -73,7 +84,7 @@ func (s3a *S3ApiServer) CopyObjectHandler(w http.ResponseWriter, r *http.Request
 	etag, errCode := s3a.putToFiler(r, dstUrl, resp.Body)
 
 	if errCode != s3err.ErrNone {
-		writeErrorResponse(w, errCode, r.URL)
+		s3err.WriteErrorResponse(w, r, errCode)
 		return
 	}
 
@@ -84,7 +95,7 @@ func (s3a *S3ApiServer) CopyObjectHandler(w http.ResponseWriter, r *http.Request
 		LastModified: time.Now().UTC(),
 	}
 
-	writeSuccessResponseXML(w, encodeResponse(response))
+	writeSuccessResponseXML(w, r, response)
 
 }
 
@@ -105,7 +116,7 @@ type CopyPartResult struct {
 func (s3a *S3ApiServer) CopyObjectPartHandler(w http.ResponseWriter, r *http.Request) {
 	// https://docs.aws.amazon.com/AmazonS3/latest/dev/CopyingObjctsUsingRESTMPUapi.html
 	// https://docs.aws.amazon.com/AmazonS3/latest/API/API_UploadPartCopy.html
-	dstBucket, _ := getBucketAndObject(r)
+	dstBucket, _ := xhttp.GetBucketAndObject(r)
 
 	// Copy source path.
 	cpSrcPath, err := url.QueryUnescape(r.Header.Get("X-Amz-Copy-Source"))
@@ -117,7 +128,7 @@ func (s3a *S3ApiServer) CopyObjectPartHandler(w http.ResponseWriter, r *http.Req
 	srcBucket, srcObject := pathToBucketAndObject(cpSrcPath)
 	// If source object is empty or bucket is empty, reply back invalid copy source.
 	if srcObject == "" || srcBucket == "" {
-		writeErrorResponse(w, s3err.ErrInvalidCopySource, r.URL)
+		s3err.WriteErrorResponse(w, r, s3err.ErrInvalidCopySource)
 		return
 	}
 
@@ -126,26 +137,28 @@ func (s3a *S3ApiServer) CopyObjectPartHandler(w http.ResponseWriter, r *http.Req
 
 	partID, err := strconv.Atoi(partIDString)
 	if err != nil {
-		writeErrorResponse(w, s3err.ErrInvalidPart, r.URL)
+		s3err.WriteErrorResponse(w, r, s3err.ErrInvalidPart)
 		return
 	}
 
+	glog.V(3).Infof("CopyObjectPartHandler %s %s => %s part %d", srcBucket, srcObject, dstBucket, partID)
+
 	// check partID with maximum part ID for multipart objects
 	if partID > globalMaxPartID {
-		writeErrorResponse(w, s3err.ErrInvalidMaxParts, r.URL)
+		s3err.WriteErrorResponse(w, r, s3err.ErrInvalidMaxParts)
 		return
 	}
 
 	rangeHeader := r.Header.Get("x-amz-copy-source-range")
 
 	dstUrl := fmt.Sprintf("http://%s%s/%s/%04d.part?collection=%s",
-		s3a.option.Filer, s3a.genUploadsFolder(dstBucket), uploadID, partID, dstBucket)
+		s3a.option.Filer.ToHttpAddress(), s3a.genUploadsFolder(dstBucket), uploadID, partID, dstBucket)
 	srcUrl := fmt.Sprintf("http://%s%s/%s%s",
-		s3a.option.Filer, s3a.option.BucketsPath, srcBucket, srcObject)
+		s3a.option.Filer.ToHttpAddress(), s3a.option.BucketsPath, srcBucket, urlPathEscape(srcObject))
 
-	dataReader, err := util.ReadUrlAsReaderCloser(srcUrl, rangeHeader)
+	dataReader, err := util.ReadUrlAsReaderCloser(srcUrl, s3a.maybeGetFilerJwtAuthorizationToken(false), rangeHeader)
 	if err != nil {
-		writeErrorResponse(w, s3err.ErrInvalidCopySource, r.URL)
+		s3err.WriteErrorResponse(w, r, s3err.ErrInvalidCopySource)
 		return
 	}
 	defer dataReader.Close()
@@ -154,7 +167,7 @@ func (s3a *S3ApiServer) CopyObjectPartHandler(w http.ResponseWriter, r *http.Req
 	etag, errCode := s3a.putToFiler(r, dstUrl, dataReader)
 
 	if errCode != s3err.ErrNone {
-		writeErrorResponse(w, errCode, r.URL)
+		s3err.WriteErrorResponse(w, r, errCode)
 		return
 	}
 
@@ -165,7 +178,7 @@ func (s3a *S3ApiServer) CopyObjectPartHandler(w http.ResponseWriter, r *http.Req
 		LastModified: time.Now().UTC(),
 	}
 
-	writeSuccessResponseXML(w, encodeResponse(response))
+	writeSuccessResponseXML(w, r, response)
 
 }
 

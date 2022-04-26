@@ -1,3 +1,9 @@
+//go:build (linux || darwin || windows) && sqlite
+// +build linux darwin windows
+// +build sqlite
+
+// limited GOOS due to modernc.org/libc/unistd
+
 package sqlite
 
 import (

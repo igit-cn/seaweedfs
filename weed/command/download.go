@@ -3,13 +3,16 @@ package command
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"path"
 	"strings"
 
+	"google.golang.org/grpc"
+
 	"github.com/chrislusf/seaweedfs/weed/operation"
+	"github.com/chrislusf/seaweedfs/weed/pb"
+	"github.com/chrislusf/seaweedfs/weed/security"
 	"github.com/chrislusf/seaweedfs/weed/util"
 )
 
@@ -43,20 +46,23 @@ var cmdDownload = &Command{
 }
 
 func runDownload(cmd *Command, args []string) bool {
+	util.LoadConfiguration("security", false)
+	grpcDialOption := security.LoadClientTLS(util.GetViper(), "grpc.client")
+
 	for _, fid := range args {
-		if e := downloadToFile(func() string { return *d.server }, fid, util.ResolvePath(*d.dir)); e != nil {
+		if e := downloadToFile(func() pb.ServerAddress { return pb.ServerAddress(*d.server) }, grpcDialOption, fid, util.ResolvePath(*d.dir)); e != nil {
 			fmt.Println("Download Error: ", fid, e)
 		}
 	}
 	return true
 }
 
-func downloadToFile(masterFn operation.GetMasterFn, fileId, saveDir string) error {
-	fileUrl, lookupError := operation.LookupFileId(masterFn, fileId)
+func downloadToFile(masterFn operation.GetMasterFn, grpcDialOption grpc.DialOption, fileId, saveDir string) error {
+	fileUrl, jwt, lookupError := operation.LookupFileId(masterFn, grpcDialOption, fileId)
 	if lookupError != nil {
 		return lookupError
 	}
-	filename, _, rc, err := util.DownloadFile(fileUrl)
+	filename, _, rc, err := util.DownloadFile(fileUrl, jwt)
 	if err != nil {
 		return err
 	}
@@ -76,14 +82,14 @@ func downloadToFile(masterFn operation.GetMasterFn, fileId, saveDir string) erro
 	}
 	defer f.Close()
 	if isFileList {
-		content, err := ioutil.ReadAll(rc.Body)
+		content, err := io.ReadAll(rc.Body)
 		if err != nil {
 			return err
 		}
 		fids := strings.Split(string(content), "\n")
 		for _, partId := range fids {
 			var n int
-			_, part, err := fetchContent(masterFn, partId)
+			_, part, err := fetchContent(masterFn, grpcDialOption, partId)
 			if err == nil {
 				n, err = f.Write(part)
 			}
@@ -103,17 +109,17 @@ func downloadToFile(masterFn operation.GetMasterFn, fileId, saveDir string) erro
 	return nil
 }
 
-func fetchContent(masterFn operation.GetMasterFn, fileId string) (filename string, content []byte, e error) {
-	fileUrl, lookupError := operation.LookupFileId(masterFn, fileId)
+func fetchContent(masterFn operation.GetMasterFn, grpcDialOption grpc.DialOption, fileId string) (filename string, content []byte, e error) {
+	fileUrl, jwt, lookupError := operation.LookupFileId(masterFn, grpcDialOption, fileId)
 	if lookupError != nil {
 		return "", nil, lookupError
 	}
 	var rc *http.Response
-	if filename, _, rc, e = util.DownloadFile(fileUrl); e != nil {
+	if filename, _, rc, e = util.DownloadFile(fileUrl, jwt); e != nil {
 		return "", nil, e
 	}
 	defer util.CloseResponse(rc)
-	content, e = ioutil.ReadAll(rc.Body)
+	content, e = io.ReadAll(rc.Body)
 	return
 }
 

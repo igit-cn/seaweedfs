@@ -1,6 +1,7 @@
 package needle
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -30,9 +31,9 @@ type Needle struct {
 	Data         []byte `comment:"The actual file data"`
 	Flags        byte   `comment:"boolean flags"` //version2
 	NameSize     uint8  //version2
-	Name         []byte `comment:"maximum 256 characters"` //version2
+	Name         []byte `comment:"maximum 255 characters"` //version2
 	MimeSize     uint8  //version2
-	Mime         []byte `comment:"maximum 256 characters"` //version2
+	Mime         []byte `comment:"maximum 255 characters"` //version2
 	PairsSize    uint16 //version2
 	Pairs        []byte `comment:"additional name value pairs, json format, maximum 64kB"`
 	LastModified uint64 //only store LastModifiedBytesLength bytes, which is 5 bytes to disk
@@ -48,9 +49,9 @@ func (n *Needle) String() (str string) {
 	return
 }
 
-func CreateNeedleFromRequest(r *http.Request, fixJpgOrientation bool, sizeLimit int64) (n *Needle, originalSize int, contentMd5 string, e error) {
+func CreateNeedleFromRequest(r *http.Request, fixJpgOrientation bool, sizeLimit int64, bytesBuffer *bytes.Buffer) (n *Needle, originalSize int, contentMd5 string, e error) {
 	n = new(Needle)
-	pu, e := ParseUpload(r, sizeLimit)
+	pu, e := ParseUpload(r, sizeLimit, bytesBuffer)
 	if e != nil {
 		return
 	}

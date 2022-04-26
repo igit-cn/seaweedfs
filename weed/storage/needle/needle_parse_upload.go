@@ -1,11 +1,11 @@
 package needle
 
 import (
+	"bytes"
 	"crypto/md5"
 	"encoding/base64"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime"
 	"net/http"
 	"path"
@@ -18,11 +18,12 @@ import (
 )
 
 type ParsedUpload struct {
-	FileName  string
-	Data      []byte
-	MimeType  string
-	PairMap   map[string]string
-	IsGzipped bool
+	FileName    string
+	Data        []byte
+	bytesBuffer *bytes.Buffer
+	MimeType    string
+	PairMap     map[string]string
+	IsGzipped   bool
 	// IsZstd           bool
 	OriginalDataSize int
 	ModifiedTime     uint64
@@ -32,8 +33,9 @@ type ParsedUpload struct {
 	ContentMd5       string
 }
 
-func ParseUpload(r *http.Request, sizeLimit int64) (pu *ParsedUpload, e error) {
-	pu = &ParsedUpload{}
+func ParseUpload(r *http.Request, sizeLimit int64, bytesBuffer *bytes.Buffer) (pu *ParsedUpload, e error) {
+	bytesBuffer.Reset()
+	pu = &ParsedUpload{bytesBuffer: bytesBuffer}
 	pu.PairMap = make(map[string]string)
 	for k, v := range r.Header {
 		if len(v) > 0 && strings.HasPrefix(k, PairNamePrefix) {
@@ -72,7 +74,7 @@ func ParseUpload(r *http.Request, sizeLimit int64) (pu *ParsedUpload, e error) {
 		if mimeType == "application/octet-stream" {
 			mimeType = ""
 		}
-		if shouldBeCompressed, iAmSure := util.IsCompressableFileType(ext, mimeType); mimeType == "" && !iAmSure || shouldBeCompressed && iAmSure {
+		if shouldBeCompressed, iAmSure := util.IsCompressableFileType(ext, mimeType); shouldBeCompressed && iAmSure {
 			// println("ext", ext, "iAmSure", iAmSure, "shouldBeCompressed", shouldBeCompressed, "mimeType", pu.MimeType)
 			if compressedData, err := util.GzipData(pu.Data); err == nil {
 				if len(compressedData)*10 < len(pu.Data)*9 {
@@ -98,15 +100,16 @@ func ParseUpload(r *http.Request, sizeLimit int64) (pu *ParsedUpload, e error) {
 	return
 }
 
-func parsePut(r *http.Request, sizeLimit int64, pu *ParsedUpload) (e error) {
+func parsePut(r *http.Request, sizeLimit int64, pu *ParsedUpload) error {
 	pu.IsGzipped = r.Header.Get("Content-Encoding") == "gzip"
 	// pu.IsZstd = r.Header.Get("Content-Encoding") == "zstd"
 	pu.MimeType = r.Header.Get("Content-Type")
 	pu.FileName = ""
-	pu.Data, e = ioutil.ReadAll(io.LimitReader(r.Body, sizeLimit+1))
-	if e == io.EOF || int64(pu.OriginalDataSize) == sizeLimit+1 {
-		io.Copy(ioutil.Discard, r.Body)
+	dataSize, err := pu.bytesBuffer.ReadFrom(io.LimitReader(r.Body, sizeLimit+1))
+	if err == io.EOF || dataSize == sizeLimit+1 {
+		io.Copy(io.Discard, r.Body)
 	}
+	pu.Data = pu.bytesBuffer.Bytes()
 	r.Body.Close()
 	return nil
 }
@@ -114,7 +117,7 @@ func parsePut(r *http.Request, sizeLimit int64, pu *ParsedUpload) (e error) {
 func parseMultipart(r *http.Request, sizeLimit int64, pu *ParsedUpload) (e error) {
 	defer func() {
 		if e != nil && r.Body != nil {
-			io.Copy(ioutil.Discard, r.Body)
+			io.Copy(io.Discard, r.Body)
 			r.Body.Close()
 		}
 	}()
@@ -138,15 +141,17 @@ func parseMultipart(r *http.Request, sizeLimit int64, pu *ParsedUpload) (e error
 		pu.FileName = path.Base(pu.FileName)
 	}
 
-	pu.Data, e = ioutil.ReadAll(io.LimitReader(part, sizeLimit+1))
+	var dataSize int64
+	dataSize, e = pu.bytesBuffer.ReadFrom(io.LimitReader(part, sizeLimit+1))
 	if e != nil {
 		glog.V(0).Infoln("Reading Content [ERROR]", e)
 		return
 	}
-	if len(pu.Data) == int(sizeLimit)+1 {
+	if dataSize == sizeLimit+1 {
 		e = fmt.Errorf("file over the limited %d bytes", sizeLimit)
 		return
 	}
+	pu.Data = pu.bytesBuffer.Bytes()
 
 	// if the filename is empty string, do a search on the other multi-part items
 	for pu.FileName == "" {
@@ -159,19 +164,20 @@ func parseMultipart(r *http.Request, sizeLimit int64, pu *ParsedUpload) (e error
 
 		// found the first <file type> multi-part has filename
 		if fName != "" {
-			data2, fe2 := ioutil.ReadAll(io.LimitReader(part2, sizeLimit+1))
+			pu.bytesBuffer.Reset()
+			dataSize2, fe2 := pu.bytesBuffer.ReadFrom(io.LimitReader(part2, sizeLimit+1))
 			if fe2 != nil {
 				glog.V(0).Infoln("Reading Content [ERROR]", fe2)
 				e = fe2
 				return
 			}
-			if len(data2) == int(sizeLimit)+1 {
+			if dataSize2 == sizeLimit+1 {
 				e = fmt.Errorf("file over the limited %d bytes", sizeLimit)
 				return
 			}
 
 			// update
-			pu.Data = data2
+			pu.Data = pu.bytesBuffer.Bytes()
 			pu.FileName = path.Base(fName)
 			break
 		}

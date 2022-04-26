@@ -3,6 +3,7 @@ package filer
 import (
 	"context"
 	"github.com/chrislusf/seaweedfs/weed/util"
+	"math"
 	"path/filepath"
 	"strings"
 )
@@ -21,6 +22,10 @@ func splitPattern(pattern string) (prefix string, restPattern string) {
 
 // For now, prefix and namePattern are mutually exclusive
 func (f *Filer) ListDirectoryEntries(ctx context.Context, p util.FullPath, startFileName string, inclusive bool, limit int64, prefix string, namePattern string, namePatternExclude string) (entries []*Entry, hasMore bool, err error) {
+
+	if limit > math.MaxInt32-1 {
+		limit = math.MaxInt32 - 1
+	}
 
 	_, err = f.StreamListDirectoryEntries(ctx, p, startFileName, inclusive, limit+1, prefix, namePattern, namePatternExclude, func(entry *Entry) bool {
 		entries = append(entries, entry)

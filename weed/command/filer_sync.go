@@ -15,7 +15,6 @@ import (
 	"github.com/chrislusf/seaweedfs/weed/util"
 	"github.com/chrislusf/seaweedfs/weed/util/grace"
 	"google.golang.org/grpc"
-	"io"
 	"strings"
 	"time"
 )
@@ -38,6 +37,7 @@ type SyncOptions struct {
 	bDebug          *bool
 	aProxyByFiler   *bool
 	bProxyByFiler   *bool
+	clientId        int32
 }
 
 var (
@@ -67,12 +67,13 @@ func init() {
 	syncOptions.bDebug = cmdFilerSynchronize.Flag.Bool("b.debug", false, "debug mode to print out filer B received files")
 	syncCpuProfile = cmdFilerSynchronize.Flag.String("cpuprofile", "", "cpu profile output file")
 	syncMemProfile = cmdFilerSynchronize.Flag.String("memprofile", "", "memory profile output file")
+	syncOptions.clientId = util.RandomInt32()
 }
 
 var cmdFilerSynchronize = &Command{
 	UsageLine: "filer.sync -a=<oneFilerHost>:<oneFilerPort> -b=<otherFilerHost>:<otherFilerPort>",
-	Short:     "resumeable continuous synchronization between two active-active or active-passive SeaweedFS clusters",
-	Long: `resumeable continuous synchronization for file changes between two active-active or active-passive filers
+	Short:     "resumable continuous synchronization between two active-active or active-passive SeaweedFS clusters",
+	Long: `resumable continuous synchronization for file changes between two active-active or active-passive filers
 
 	filer.sync listens on filer notifications. If any file is updated, it will fetch the updated content,
 	and write to the other destination. Different from filer.replicate:
@@ -89,13 +90,16 @@ var cmdFilerSynchronize = &Command{
 
 func runFilerSynchronize(cmd *Command, args []string) bool {
 
+	util.LoadConfiguration("security", false)
 	grpcDialOption := security.LoadClientTLS(util.GetViper(), "grpc.client")
 
 	grace.SetupProfiling(*syncCpuProfile, *syncMemProfile)
 
+	filerA := pb.ServerAddress(*syncOptions.filerA)
+	filerB := pb.ServerAddress(*syncOptions.filerB)
 	go func() {
 		for {
-			err := doSubscribeFilerMetaChanges(grpcDialOption, *syncOptions.filerA, *syncOptions.aPath, *syncOptions.aProxyByFiler, *syncOptions.filerB,
+			err := doSubscribeFilerMetaChanges(syncOptions.clientId, grpcDialOption, filerA, *syncOptions.aPath, *syncOptions.aProxyByFiler, filerB,
 				*syncOptions.bPath, *syncOptions.bReplication, *syncOptions.bCollection, *syncOptions.bTtlSec, *syncOptions.bProxyByFiler, *syncOptions.bDiskType, *syncOptions.bDebug)
 			if err != nil {
 				glog.Errorf("sync from %s to %s: %v", *syncOptions.filerA, *syncOptions.filerB, err)
@@ -107,7 +111,7 @@ func runFilerSynchronize(cmd *Command, args []string) bool {
 	if !*syncOptions.isActivePassive {
 		go func() {
 			for {
-				err := doSubscribeFilerMetaChanges(grpcDialOption, *syncOptions.filerB, *syncOptions.bPath, *syncOptions.bProxyByFiler, *syncOptions.filerA,
+				err := doSubscribeFilerMetaChanges(syncOptions.clientId, grpcDialOption, filerB, *syncOptions.bPath, *syncOptions.bProxyByFiler, filerA,
 					*syncOptions.aPath, *syncOptions.aReplication, *syncOptions.aCollection, *syncOptions.aTtlSec, *syncOptions.aProxyByFiler, *syncOptions.aDiskType, *syncOptions.aDebug)
 				if err != nil {
 					glog.Errorf("sync from %s to %s: %v", *syncOptions.filerB, *syncOptions.filerA, err)
@@ -122,7 +126,7 @@ func runFilerSynchronize(cmd *Command, args []string) bool {
 	return true
 }
 
-func doSubscribeFilerMetaChanges(grpcDialOption grpc.DialOption, sourceFiler, sourcePath string, sourceReadChunkFromFiler bool, targetFiler, targetPath string,
+func doSubscribeFilerMetaChanges(clientId int32, grpcDialOption grpc.DialOption, sourceFiler pb.ServerAddress, sourcePath string, sourceReadChunkFromFiler bool, targetFiler pb.ServerAddress, targetPath string,
 	replicationStr, collection string, ttlSec int, sinkWriteChunkByFiler bool, diskType string, debug bool) error {
 
 	// read source filer signature
@@ -147,9 +151,9 @@ func doSubscribeFilerMetaChanges(grpcDialOption grpc.DialOption, sourceFiler, so
 
 	// create filer sink
 	filerSource := &source.FilerSource{}
-	filerSource.DoInitialize(sourceFiler, pb.ServerToGrpcAddress(sourceFiler), sourcePath, sourceReadChunkFromFiler)
+	filerSource.DoInitialize(sourceFiler.ToHttpAddress(), sourceFiler.ToGrpcAddress(), sourcePath, sourceReadChunkFromFiler)
 	filerSink := &filersink.FilerSink{}
-	filerSink.DoInitialize(targetFiler, pb.ServerToGrpcAddress(targetFiler), targetPath, replicationStr, collection, ttlSec, diskType, grpcDialOption, sinkWriteChunkByFiler)
+	filerSink.DoInitialize(targetFiler.ToHttpAddress(), targetFiler.ToGrpcAddress(), targetPath, replicationStr, collection, ttlSec, diskType, grpcDialOption, sinkWriteChunkByFiler)
 	filerSink.SetSourceFiler(filerSource)
 
 	persistEventFn := genProcessFunction(sourcePath, targetPath, filerSink, debug)
@@ -165,49 +169,16 @@ func doSubscribeFilerMetaChanges(grpcDialOption grpc.DialOption, sourceFiler, so
 		return persistEventFn(resp)
 	}
 
-	return pb.WithFilerClient(sourceFiler, grpcDialOption, func(client filer_pb.SeaweedFilerClient) error {
-
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		stream, err := client.SubscribeMetadata(ctx, &filer_pb.SubscribeMetadataRequest{
-			ClientName: "syncTo_" + targetFiler,
-			PathPrefix: sourcePath,
-			SinceNs:    sourceFilerOffsetTsNs,
-			Signature:  targetFilerSignature,
-		})
-		if err != nil {
-			return fmt.Errorf("listen: %v", err)
-		}
-
-		var counter int64
-		var lastWriteTime time.Time
-		for {
-			resp, listenErr := stream.Recv()
-			if listenErr == io.EOF {
-				return nil
-			}
-			if listenErr != nil {
-				return listenErr
-			}
-
-			if err := processEventFn(resp); err != nil {
-				return err
-			}
-
-			counter++
-			if lastWriteTime.Add(3 * time.Second).Before(time.Now()) {
-				glog.V(0).Infof("sync %s => %s progressed to %v %0.2f/sec", sourceFiler, targetFiler, time.Unix(0, resp.TsNs), float64(counter)/float64(3))
-				counter = 0
-				lastWriteTime = time.Now()
-				if err := setOffset(grpcDialOption, targetFiler, SyncKeyPrefix, sourceFilerSignature, resp.TsNs); err != nil {
-					return err
-				}
-			}
-
-		}
-
+	var lastLogTsNs = time.Now().Nanosecond()
+	processEventFnWithOffset := pb.AddOffsetFunc(processEventFn, 3*time.Second, func(counter int64, lastTsNs int64) error {
+		now := time.Now().Nanosecond()
+		glog.V(0).Infof("sync %s to %s progressed to %v %0.2f/sec", sourceFiler, targetFiler, time.Unix(0, lastTsNs), float64(counter)/(float64(now-lastLogTsNs)/1e9))
+		lastLogTsNs = now
+		return setOffset(grpcDialOption, targetFiler, SyncKeyPrefix, sourceFilerSignature, lastTsNs)
 	})
+
+	return pb.FollowMetadata(sourceFiler, grpcDialOption, "syncTo_"+string(targetFiler), clientId,
+		sourcePath, nil, sourceFilerOffsetTsNs, targetFilerSignature, processEventFnWithOffset, false)
 
 }
 
@@ -215,9 +186,9 @@ const (
 	SyncKeyPrefix = "sync."
 )
 
-func getOffset(grpcDialOption grpc.DialOption, filer string, signaturePrefix string, signature int32) (lastOffsetTsNs int64, readErr error) {
+func getOffset(grpcDialOption grpc.DialOption, filer pb.ServerAddress, signaturePrefix string, signature int32) (lastOffsetTsNs int64, readErr error) {
 
-	readErr = pb.WithFilerClient(filer, grpcDialOption, func(client filer_pb.SeaweedFilerClient) error {
+	readErr = pb.WithFilerClient(false, filer, grpcDialOption, func(client filer_pb.SeaweedFilerClient) error {
 		syncKey := []byte(signaturePrefix + "____")
 		util.Uint32toBytes(syncKey[len(signaturePrefix):len(signaturePrefix)+4], uint32(signature))
 
@@ -242,8 +213,8 @@ func getOffset(grpcDialOption grpc.DialOption, filer string, signaturePrefix str
 
 }
 
-func setOffset(grpcDialOption grpc.DialOption, filer string, signaturePrefix string, signature int32, offsetTsNs int64) error {
-	return pb.WithFilerClient(filer, grpcDialOption, func(client filer_pb.SeaweedFilerClient) error {
+func setOffset(grpcDialOption grpc.DialOption, filer pb.ServerAddress, signaturePrefix string, signature int32, offsetTsNs int64) error {
+	return pb.WithFilerClient(false, filer, grpcDialOption, func(client filer_pb.SeaweedFilerClient) error {
 
 		syncKey := []byte(signaturePrefix + "____")
 		util.Uint32toBytes(syncKey[len(signaturePrefix):len(signaturePrefix)+4], uint32(signature))
@@ -291,16 +262,19 @@ func genProcessFunction(sourcePath string, targetPath string, dataSink sink.Repl
 		}
 
 		// handle deletions
-		if message.OldEntry != nil && message.NewEntry == nil {
+		if filer_pb.IsDelete(resp) {
 			if !strings.HasPrefix(string(sourceOldKey), sourcePath) {
 				return nil
 			}
 			key := buildKey(dataSink, message, targetPath, sourceOldKey, sourcePath)
-			return dataSink.DeleteEntry(key, message.OldEntry.IsDirectory, message.DeleteChunks, message.Signatures)
+			if !dataSink.IsIncremental() {
+				return dataSink.DeleteEntry(key, message.OldEntry.IsDirectory, message.DeleteChunks, message.Signatures)
+			}
+			return nil
 		}
 
 		// handle new entries
-		if message.OldEntry == nil && message.NewEntry != nil {
+		if filer_pb.IsCreate(resp) {
 			if !strings.HasPrefix(string(sourceNewKey), sourcePath) {
 				return nil
 			}
@@ -309,7 +283,7 @@ func genProcessFunction(sourcePath string, targetPath string, dataSink sink.Repl
 		}
 
 		// this is something special?
-		if message.OldEntry == nil && message.NewEntry == nil {
+		if filer_pb.IsEmpty(resp) {
 			return nil
 		}
 
@@ -359,16 +333,19 @@ func genProcessFunction(sourcePath string, targetPath string, dataSink sink.Repl
 	return processEventFn
 }
 
-func buildKey(dataSink sink.ReplicationSink, message *filer_pb.EventNotification, targetPath string, sourceKey util.FullPath, sourcePath string) string {
+func buildKey(dataSink sink.ReplicationSink, message *filer_pb.EventNotification, targetPath string, sourceKey util.FullPath, sourcePath string) (key string) {
 	if !dataSink.IsIncremental() {
-		return util.Join(targetPath, string(sourceKey)[len(sourcePath):])
+		key = util.Join(targetPath, string(sourceKey)[len(sourcePath):])
+	} else {
+		var mTime int64
+		if message.NewEntry != nil {
+			mTime = message.NewEntry.Attributes.Mtime
+		} else if message.OldEntry != nil {
+			mTime = message.OldEntry.Attributes.Mtime
+		}
+		dateKey := time.Unix(mTime, 0).Format("2006-01-02")
+		key = util.Join(targetPath, dateKey, string(sourceKey)[len(sourcePath):])
 	}
-	var mTime int64
-	if message.NewEntry != nil {
-		mTime = message.NewEntry.Attributes.Mtime
-	} else if message.OldEntry != nil {
-		mTime = message.OldEntry.Attributes.Mtime
-	}
-	dateKey := time.Unix(mTime, 0).Format("2006-01-02")
-	return util.Join(targetPath, dateKey, string(sourceKey)[len(sourcePath):])
+
+	return escapeKey(key)
 }

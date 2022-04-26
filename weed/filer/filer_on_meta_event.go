@@ -2,8 +2,6 @@ package filer
 
 import (
 	"bytes"
-	"math"
-
 	"github.com/chrislusf/seaweedfs/weed/glog"
 	"github.com/chrislusf/seaweedfs/weed/pb/filer_pb"
 	"github.com/chrislusf/seaweedfs/weed/util"
@@ -12,6 +10,7 @@ import (
 // onMetadataChangeEvent is triggered after filer processed change events from local or remote filers
 func (f *Filer) onMetadataChangeEvent(event *filer_pb.SubscribeMetadataResponse) {
 	f.maybeReloadFilerConfiguration(event)
+	f.maybeReloadRemoteStorageConfigurationAndMapping(event)
 	f.onBucketEvents(event)
 }
 
@@ -23,11 +22,15 @@ func (f *Filer) onBucketEvents(event *filer_pb.SubscribeMetadataResponse) {
 		}
 	}
 	if f.DirBucketsPath == event.Directory {
-		if message.OldEntry == nil && message.NewEntry != nil {
-			f.Store.OnBucketCreation(message.NewEntry.Name)
+		if filer_pb.IsCreate(event) {
+			if message.NewEntry.IsDirectory {
+				f.Store.OnBucketCreation(message.NewEntry.Name)
+			}
 		}
-		if message.OldEntry != nil && message.NewEntry == nil {
-			f.Store.OnBucketDeletion(message.OldEntry.Name)
+		if filer_pb.IsDelete(event) {
+			if message.OldEntry.IsDirectory {
+				f.Store.OnBucketDeletion(message.OldEntry.Name)
+			}
 		}
 	}
 }
@@ -50,9 +53,9 @@ func (f *Filer) maybeReloadFilerConfiguration(event *filer_pb.SubscribeMetadataR
 	}
 }
 
-func (f *Filer) readEntry(chunks []*filer_pb.FileChunk) ([]byte, error) {
+func (f *Filer) readEntry(chunks []*filer_pb.FileChunk, size uint64) ([]byte, error) {
 	var buf bytes.Buffer
-	err := StreamContent(f.MasterClient, &buf, chunks, 0, math.MaxInt64)
+	err := StreamContent(f.MasterClient, &buf, chunks, 0, int64(size))
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +64,7 @@ func (f *Filer) readEntry(chunks []*filer_pb.FileChunk) ([]byte, error) {
 
 func (f *Filer) reloadFilerConfiguration(entry *filer_pb.Entry) {
 	fc := NewFilerConf()
-	err := fc.loadFromChunks(f, entry.Content, entry.Chunks)
+	err := fc.loadFromChunks(f, entry.Content, entry.Chunks, FileSize(entry))
 	if err != nil {
 		glog.Errorf("read filer conf chunks: %v", err)
 		return
@@ -79,4 +82,17 @@ func (f *Filer) LoadFilerConf() {
 		return
 	}
 	f.FilerConf = fc
+}
+
+////////////////////////////////////
+// load and maintain remote storages
+////////////////////////////////////
+func (f *Filer) LoadRemoteStorageConfAndMapping() {
+	if err := f.RemoteStorage.LoadRemoteStorageConfigurationsAndMapping(f); err != nil {
+		glog.Errorf("read remote conf and mapping: %v", err)
+		return
+	}
+}
+func (f *Filer) maybeReloadRemoteStorageConfigurationAndMapping(event *filer_pb.SubscribeMetadataResponse) {
+	// FIXME add reloading
 }
